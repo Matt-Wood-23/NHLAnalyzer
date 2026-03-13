@@ -23,12 +23,13 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
-from features.team import load_team_features, WINDOWS, ROLL_STATS
+from features.team import load_team_features, WINDOWS, ROLL_STATS, EWM_HALFLIFE, EWM_STATS
 from features.goalie import load_goalie_features
 from features.goalie_mp import load_goalie_features_from_mp
 from features.context import load_context_features
 from features.special_teams import load_special_teams_features
 from features.elo import compute_elo_ratings, save_current_elos
+from features.opponent_quality import compute_opponent_quality_features
 
 logger = logging.getLogger(__name__)
 
@@ -46,13 +47,22 @@ _META_COLS = {
     "shots_for", "shots_against", "corsi_for", "corsi_against",
     "hd_chances_for", "hd_chances_against", "hd_goals_for", "hd_goals_against",
     "won",  # current game win — the TARGET, not a feature
+    "regulation_win",  # raw per-game — rolling version is the feature
 }
 
 
 def _rolling_feature_cols(df: pd.DataFrame) -> list[str]:
-    """Return column names that are rolling features (suffix _lN)."""
-    return [c for c in df.columns if any(c.endswith(f"_l{w}") for w in WINDOWS)
-            or c == "games_played"]
+    """Return column names that are rolling features (suffix _lN, _ewmN, _venue_lN)."""
+    ewm_suffix = f"_ewm{EWM_HALFLIFE}"
+    venue_suffixes = ("_home_l10", "_away_l10")
+    return [
+        c for c in df.columns
+        if any(c.endswith(f"_l{w}") for w in WINDOWS)
+        or c.endswith(ewm_suffix)
+        or c.endswith(venue_suffixes[0])
+        or c.endswith(venue_suffixes[1])
+        or c == "games_played"
+    ]
 
 
 def build_feature_matrix(conn=None) -> pd.DataFrame:
@@ -116,7 +126,7 @@ def build_feature_matrix(conn=None) -> pd.DataFrame:
     ctx_cols = [
         "game_id", "home_back_to_back", "away_back_to_back",
         "home_rest_days", "away_rest_days", "rest_advantage", "season_day",
-        "h2h_home_win_rate_l3",
+        "h2h_home_win_rate_l3", "same_division", "same_conference",
     ]
     ctx_keep = [c for c in ctx_cols if c in ctx.columns]
     matrix = matrix.merge(ctx[ctx_keep], on="game_id", how="left")
@@ -199,7 +209,38 @@ def build_feature_matrix(conn=None) -> pd.DataFrame:
     save_current_elos(home_results)
 
     # ------------------------------------------------------------------ #
-    # 7. Drop games with unknown outcome                                   #
+    # 7. Opponent quality-adjusted features                                #
+    # ------------------------------------------------------------------ #
+    oq_feats = compute_opponent_quality_features(team_feats)
+    if not oq_feats.empty:
+        oq_roll = [c for c in oq_feats.columns if c not in ("game_id", "team")]
+        home_oq = (
+            oq_feats
+            .rename(columns={c: f"home_{c}" for c in oq_roll} | {"team": "_oq_team"})
+            .merge(matrix[["game_id", "home_team"]], on="game_id", how="right")
+            .query("_oq_team == home_team", engine="python")
+            .drop(columns=["_oq_team", "home_team"])
+        )
+        away_oq = (
+            oq_feats
+            .rename(columns={c: f"away_{c}" for c in oq_roll} | {"team": "_oq_team"})
+            .merge(matrix[["game_id", "away_team"]], on="game_id", how="right")
+            .query("_oq_team == away_team", engine="python")
+            .drop(columns=["_oq_team", "away_team"])
+        )
+        matrix = matrix.merge(home_oq, on="game_id", how="left")
+        matrix = matrix.merge(away_oq, on="game_id", how="left")
+
+        for col in oq_roll:
+            h_col = f"home_{col}"
+            a_col = f"away_{col}"
+            if h_col in matrix.columns and a_col in matrix.columns:
+                matrix[f"diff_{col}"] = matrix[h_col] - matrix[a_col]
+
+        logger.info("Opponent quality features merged: %d columns", len(oq_roll) * 3)
+
+    # ------------------------------------------------------------------ #
+    # 8. Drop games with unknown outcome                                   #
     # ------------------------------------------------------------------ #
     before = len(matrix)
     matrix = matrix[matrix["target"].notna()].reset_index(drop=True)

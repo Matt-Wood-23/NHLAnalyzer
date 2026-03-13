@@ -5,7 +5,8 @@ Each row in the output represents one team's *pre-game* feature snapshot —
 i.e., rolling averages of past games (current game excluded via shift(1)).
 Rolling is bounded by season: no stats bleed across season boundaries.
 
-Output columns include suffix _l5, _l10, _l20 for each lookback window.
+Output columns include suffix _l5, _l10, _l20 for each lookback window,
+plus _ewm7 for exponentially weighted means (halflife=7 games).
 """
 
 import logging
@@ -19,6 +20,7 @@ logger = logging.getLogger(__name__)
 PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
 
 WINDOWS: list[int] = [5, 10, 20]
+EWM_HALFLIFE: int = 7  # exponential decay halflife in games
 
 # Raw per-game stats to roll
 ROLL_STATS = [
@@ -36,6 +38,14 @@ ROLL_STATS = [
     "hd_chances_for",
     "hd_chances_against",
     "won",
+    "regulation_win",
+]
+
+# Subset of stats worth computing EWM and home/away splits for
+# (full list would explode feature count — focus on highest-signal stats)
+EWM_STATS = [
+    "xgf_pct", "xgf_pct_5v5", "cf_pct", "sf_pct",
+    "goals_for", "goals_against", "goal_diff", "won",
 ]
 
 
@@ -57,6 +67,12 @@ def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     # won: 1.0 if this team won, 0.0 otherwise
     df["won"]         = (df["goals_for"] > df["goals_against"]).astype(float)
 
+    # regulation_win: 1.0 if won in regulation (no OT/SO).
+    # Populated later by _add_regulation_wins() from shot-level period data.
+    # Default to NaN — filled when raw shots are available.
+    if "regulation_win" not in df.columns:
+        df["regulation_win"] = np.nan
+
     return df
 
 
@@ -74,9 +90,66 @@ def _rolling_team_season(grp: pd.DataFrame) -> pd.DataFrame:
         shifted = grp[col].shift(1)
         for w in WINDOWS:
             grp[f"{col}_l{w}"] = shifted.rolling(w, min_periods=1).mean()
+
+    # EWM (exponentially weighted mean) — recent games weighted more heavily
+    for col in EWM_STATS:
+        if col not in grp.columns:
+            continue
+        shifted = grp[col].shift(1)
+        grp[f"{col}_ewm{EWM_HALFLIFE}"] = shifted.ewm(
+            halflife=EWM_HALFLIFE, min_periods=1
+        ).mean()
+
+    # Home/away split rolling: stats computed only from games at the same venue
+    # This captures teams that play very differently home vs away
+    if "is_home" in grp.columns:
+        for venue, label in [(True, "home"), (False, "away")]:
+            venue_mask = grp["is_home"] == venue
+            for col in EWM_STATS:
+                if col not in grp.columns:
+                    continue
+                vals = grp[col].where(venue_mask, np.nan).shift(1)
+                grp[f"{col}_{label}_l10"] = vals.rolling(10, min_periods=1).mean()
+
     # Track games played this season (useful for confidence / early-season flagging)
     grp["games_played"] = np.arange(len(grp))  # 0-indexed, first game = 0
     return grp
+
+
+def _add_regulation_wins(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Determine which games went to OT/SO from raw MoneyPuck shot CSVs.
+    Sets regulation_win = 1 if team won AND game ended in regulation (max period <= 3).
+    """
+    from ingestion.moneypuck import MP_SEASONS, mp_game_id_to_nhl
+
+    raw_dir = Path(__file__).parent.parent / "data" / "raw"
+    ot_games = set()
+
+    for season, year in MP_SEASONS.items():
+        path = raw_dir / f"moneypuck_shots_{year}.csv"
+        if not path.exists():
+            continue
+        shots = pd.read_csv(
+            path, usecols=["game_id", "period", "isPlayoffGame"], low_memory=False,
+        )
+        shots = shots[shots["isPlayoffGame"] == 0]
+        max_period = shots.groupby("game_id")["period"].max()
+        ot_mp_ids = max_period[max_period > 3].index
+
+        for mp_id in ot_mp_ids:
+            nhl_id = mp_game_id_to_nhl(str(int(float(mp_id))), season)
+            ot_games.add(nhl_id)
+
+    logger.info("Identified %d OT/SO games across all seasons", len(ot_games))
+
+    went_to_ot = df["game_id"].isin(ot_games)
+    df["regulation_win"] = np.where(
+        df["won"] == 1.0,
+        np.where(went_to_ot, 0.0, 1.0),
+        0.0,
+    )
+    return df
 
 
 def load_team_features(parquet_path: Path | str | None = None) -> pd.DataFrame:
@@ -99,6 +172,7 @@ def load_team_features(parquet_path: Path | str | None = None) -> pd.DataFrame:
     logger.info("Loaded %d team-game rows", len(df))
 
     df = _add_derived_columns(df)
+    df = _add_regulation_wins(df)
 
     # Sort key: last 4 digits of NHL game_id = sequential game number within season
     df["game_num"] = df["game_id"].str[-4:].astype(int)

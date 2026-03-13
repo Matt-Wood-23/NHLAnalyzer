@@ -1,6 +1,6 @@
 """
 Situational context features: back-to-back, rest advantage, season day,
-and head-to-head recent record.
+head-to-head recent record, and division/conference flags.
 
 Requires game dates to compute rest correctly.  This module tries Postgres
 first; if unavailable it approximates dates from the sequential game_id
@@ -15,6 +15,30 @@ from typing import Optional
 import pandas as pd
 
 logger = logging.getLogger(__name__)
+
+# NHL division/conference structure (2021-22 onwards, post-Seattle expansion)
+# UTA (Utah Hockey Club) replaced ARI in 2024-25
+_DIVISIONS: dict[str, str] = {
+    # Atlantic
+    "BOS": "Atlantic", "BUF": "Atlantic", "DET": "Atlantic", "FLA": "Atlantic",
+    "MTL": "Atlantic", "OTT": "Atlantic", "TBL": "Atlantic", "TOR": "Atlantic",
+    # Metropolitan
+    "CAR": "Metropolitan", "CBJ": "Metropolitan", "NJD": "Metropolitan",
+    "NYI": "Metropolitan", "NYR": "Metropolitan", "PHI": "Metropolitan",
+    "PIT": "Metropolitan", "WSH": "Metropolitan",
+    # Central
+    "ARI": "Central", "UTA": "Central", "CHI": "Central", "COL": "Central",
+    "DAL": "Central", "MIN": "Central", "NSH": "Central", "STL": "Central",
+    "WPG": "Central",
+    # Pacific
+    "ANA": "Pacific", "CGY": "Pacific", "EDM": "Pacific", "LAK": "Pacific",
+    "SJS": "Pacific", "SEA": "Pacific", "VAN": "Pacific", "VGK": "Pacific",
+}
+
+_CONFERENCES: dict[str, str] = {
+    team: ("Eastern" if div in ("Atlantic", "Metropolitan") else "Western")
+    for team, div in _DIVISIONS.items()
+}
 
 # Approximate season start dates for date estimation fallback
 _SEASON_STARTS: dict[str, str] = {
@@ -172,6 +196,24 @@ def load_context_features(
         ctx = ctx.merge(h2h[["game_id", "h2h_home_win_rate_l3"]], on="game_id", how="left")
     else:
         ctx["h2h_home_win_rate_l3"] = None
+
+    # ------------------------------------------------------------------
+    # 5. Division / conference matchup flags
+    # ------------------------------------------------------------------
+    ctx["same_division"] = ctx.apply(
+        lambda r: int(
+            _DIVISIONS.get(r["home_team"], "") == _DIVISIONS.get(r["away_team"], "")
+            and _DIVISIONS.get(r["home_team"], "") != ""
+        ),
+        axis=1,
+    )
+    ctx["same_conference"] = ctx.apply(
+        lambda r: int(
+            _CONFERENCES.get(r["home_team"], "") == _CONFERENCES.get(r["away_team"], "")
+            and _CONFERENCES.get(r["home_team"], "") != ""
+        ),
+        axis=1,
+    )
 
     logger.info("Context features ready: %d games", len(ctx))
     return ctx
