@@ -1,0 +1,12 @@
+.env
+data/raw/
+data/parquet/
+data/exports/
+data/cache/
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+mlruns/
+*.egg-info/
+.venv/
