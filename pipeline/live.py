@@ -29,9 +29,10 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from features.team import _add_derived_columns, ROLL_STATS, WINDOWS
+from features.team import _add_derived_columns, _add_regulation_wins, ROLL_STATS, WINDOWS, EWM_STATS, EWM_HALFLIFE
 from features.goalie_mp import GOALIE_WINDOWS
 from features.special_teams import ST_WINDOWS
+from features.context import _DIVISIONS, _CONFERENCES
 from ingestion.nhl_api import fetch_schedule
 
 logger = logging.getLogger(__name__)
@@ -62,14 +63,18 @@ def _build_team_snapshot(parquet_path: Optional[Path] = None) -> pd.DataFrame:
     Each row = rolling mean of that team's last 5 / 10 / 20 completed games
     (across season boundaries — we want their real recent form).
 
+    Also computes EWM features, home/away venue splits, and regulation win.
+
     Index: team abbreviation.
-    Columns: {stat}_l5, {stat}_l10, {stat}_l20, games_played.
+    Columns: {stat}_l5, {stat}_l10, {stat}_l20, {stat}_ewm7, {stat}_home_l10,
+             {stat}_away_l10, games_played.
     """
     if parquet_path is None:
         parquet_path = PARQUET_DIR / "moneypuck_team_game_stats.parquet"
 
     df = pd.read_parquet(parquet_path)
     df = _add_derived_columns(df)
+    df = _add_regulation_wins(df)
     df["game_num"] = df["game_id"].str[-4:].astype(int)
     df = df.sort_values(["team", "season", "game_num"])
 
@@ -78,12 +83,37 @@ def _build_team_snapshot(parquet_path: Optional[Path] = None) -> pd.DataFrame:
     for team, grp in df.groupby("team", sort=False):
         row: dict = {"team": team}
         recent = grp.tail(max_w)
+
+        # Standard rolling averages
         for col in ROLL_STATS:
             if col not in recent.columns:
                 continue
             for w in WINDOWS:
                 vals = recent.tail(w)[col].dropna()
                 row[f"{col}_l{w}"] = float(vals.mean()) if len(vals) > 0 else np.nan
+
+        # EWM features (use all available games, ewm naturally weights recent more)
+        for col in EWM_STATS:
+            if col not in grp.columns:
+                continue
+            vals = grp[col].dropna()
+            if len(vals) > 0:
+                row[f"{col}_ewm{EWM_HALFLIFE}"] = float(
+                    vals.ewm(halflife=EWM_HALFLIFE, min_periods=1).mean().iloc[-1]
+                )
+            else:
+                row[f"{col}_ewm{EWM_HALFLIFE}"] = np.nan
+
+        # Home/away venue split rolling (last 10 games at matching venue)
+        for venue, label in [(True, "home"), (False, "away")]:
+            venue_games = grp[grp["is_home"] == venue]
+            recent_venue = venue_games.tail(10)
+            for col in EWM_STATS:
+                if col not in recent_venue.columns:
+                    continue
+                vals = recent_venue[col].dropna()
+                row[f"{col}_{label}_l10"] = float(vals.mean()) if len(vals) > 0 else np.nan
+
         row["games_played"] = len(grp)
         rows.append(row)
 
@@ -218,6 +248,52 @@ def _build_elo_snapshot() -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Opponent quality snapshot (rolling stats vs strong/weak opponents)
+# ---------------------------------------------------------------------------
+
+def _build_opponent_quality_snapshot() -> pd.DataFrame:
+    """
+    Return one row per team with opponent-quality-adjusted rolling stats.
+    Uses the feature matrix built during backfill — extracts the latest
+    per-team values for oq columns.
+
+    Index: team abbreviation.
+    """
+    fm_path = PARQUET_DIR / "feature_matrix.parquet"
+    if not fm_path.exists():
+        logger.warning("No feature_matrix.parquet — opponent quality features will be NaN")
+        return pd.DataFrame()
+
+    fm = pd.read_parquet(fm_path)
+    oq_cols = [c for c in fm.columns if "_vs_strong_" in c or "_vs_weak_" in c]
+    if not oq_cols:
+        return pd.DataFrame()
+
+    # Get home/away oq columns from the latest game per team
+    home_oq = [c for c in oq_cols if c.startswith("home_")]
+    away_oq = [c for c in oq_cols if c.startswith("away_")]
+
+    rows = []
+    # Extract from home-team perspective
+    for team in fm["home_team"].unique():
+        team_games = fm[fm["home_team"] == team].iloc[-1:]
+        if team_games.empty:
+            continue
+        row = {"team": team}
+        for col in home_oq:
+            base = col.replace("home_", "", 1)
+            row[base] = team_games.iloc[0].get(col, np.nan)
+        rows.append(row)
+
+    if not rows:
+        return pd.DataFrame()
+
+    snapshot = pd.DataFrame(rows).set_index("team")
+    logger.info("Opponent quality snapshot built: %d teams", len(snapshot))
+    return snapshot
+
+
+# ---------------------------------------------------------------------------
 # Last game date per team (for rest / back-to-back)
 # ---------------------------------------------------------------------------
 
@@ -279,6 +355,15 @@ def _build_context_row(
 
     home_rest = _rest(home_team)
     away_rest = _rest(away_team)
+
+    # Division/conference flags
+    home_div = _DIVISIONS.get(home_team, "")
+    away_div = _DIVISIONS.get(away_team, "")
+    same_div = int(home_div == away_div and home_div != "")
+    home_conf = _CONFERENCES.get(home_team, "")
+    away_conf = _CONFERENCES.get(away_team, "")
+    same_conf = int(home_conf == away_conf and home_conf != "")
+
     return {
         "home_rest_days":    home_rest,
         "away_rest_days":    away_rest,
@@ -287,6 +372,8 @@ def _build_context_row(
         "rest_advantage":    (home_rest or 2.0) - (away_rest or 2.0),
         "season_day":        float((game_date - season_start).days),
         "h2h_home_win_rate_l3": np.nan,  # filled below if DB available
+        "same_division":     same_div,
+        "same_conference":   same_conf,
     }
 
 
@@ -331,6 +418,7 @@ def build_live_features(
     goalie_snapshot: pd.DataFrame | None = None,
     st_snapshot: pd.DataFrame | None = None,
     elo_snapshot: pd.DataFrame | None = None,
+    oq_snapshot: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Build a feature matrix (one row per scheduled game) compatible with the
@@ -415,6 +503,19 @@ def build_live_features(
                 if pd.notna(h_elo) and pd.notna(a_elo)
                 else np.nan
             )
+
+        # Opponent quality features
+        if oq_snapshot is not None and not oq_snapshot.empty:
+            for side, team in [("home", home), ("away", away)]:
+                if team in oq_snapshot.index:
+                    for col in oq_snapshot.columns:
+                        row[f"{side}_{col}"] = oq_snapshot.loc[team, col]
+            # Diff features for opponent quality
+            for col in oq_snapshot.columns:
+                h_val = row.get(f"home_{col}", np.nan)
+                a_val = row.get(f"away_{col}", np.nan)
+                if pd.notna(h_val) and pd.notna(a_val):
+                    row[f"diff_{col}"] = float(h_val) - float(a_val)
 
         rows.append(row)
 
@@ -574,10 +675,11 @@ def run(
     # 2. Team rolling snapshot (last N completed games)
     snapshot = _build_team_snapshot()
 
-    # 2b. Goalie, special teams, and ELO snapshots
+    # 2b. Goalie, special teams, ELO, and opponent quality snapshots
     goalie_snapshot = _build_goalie_snapshot()
     st_snapshot = _build_special_teams_snapshot()
     elo_snapshot = _build_elo_snapshot()
+    oq_snapshot = _build_opponent_quality_snapshot()
 
     # 3. Last game date per team (for rest / B2B)
     last_game = _team_last_game_date(
@@ -591,6 +693,7 @@ def run(
         goalie_snapshot=goalie_snapshot,
         st_snapshot=st_snapshot,
         elo_snapshot=elo_snapshot,
+        oq_snapshot=oq_snapshot,
     )
     if live_df.empty:
         logger.warning("No games could be featurized — check team abbreviation mapping")

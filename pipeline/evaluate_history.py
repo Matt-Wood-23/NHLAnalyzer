@@ -43,6 +43,9 @@ def backfill_outcomes() -> pd.DataFrame:
         logger.warning("No feature matrix found — cannot look up outcomes")
         return hist
 
+    # Drop previous outcome columns before re-merging (avoids _x/_y duplicates)
+    hist = hist.drop(columns=["actual_home_win", "correct", "brier"], errors="ignore")
+
     fm = pd.read_parquet(fm_path, columns=["game_id", "target"])
     outcomes = fm.rename(columns={"target": "actual_home_win"})
 

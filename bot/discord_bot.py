@@ -144,7 +144,7 @@ def format_game_embed(row: dict) -> dict:
         "title": f"{_team_str(away)} @ {_team_str(home)}",
         "description": description,
         "color": color,
-        "footer": {"text": "NHL Analyzer • RF + ELO v2"},
+        "footer": {"text": "NHL Analyzer • ML v3"},
     }
 
 
@@ -256,7 +256,16 @@ def format_history_embed(last_n: int = 50) -> dict:
             "color": _COLOR_HIST,
         }
 
-    hist = pd.read_parquet(path)
+    # Try to backfill outcomes before displaying
+    try:
+        from pipeline.evaluate_history import backfill_outcomes
+        hist = backfill_outcomes()
+    except Exception:
+        hist = pd.read_parquet(path)
+
+    if hist.empty:
+        hist = pd.read_parquet(path)
+
     total = len(hist)
     unique_dates = hist["predicted_at"].str[:10].nunique() if "predicted_at" in hist.columns else "?"
     models_used = ", ".join(hist["model_name"].unique()) if "model_name" in hist.columns else "unknown"
@@ -264,10 +273,37 @@ def format_history_embed(last_n: int = 50) -> dict:
     description = (
         f"**Total predictions logged:** {total}\n"
         f"**Prediction dates:** {unique_dates}\n"
-        f"**Models used:** {models_used}\n\n"
-        f"*Accuracy tracking requires game outcomes. "
-        f"Run `python -m pipeline.backfill` after games complete to update results.*"
+        f"**Models used:** {models_used}\n"
     )
+
+    # Show accuracy if outcomes are available
+    has_outcome = hist.get("actual_home_win")
+    if has_outcome is not None and has_outcome.notna().any():
+        evaluated = hist[hist["actual_home_win"].notna()]
+        n_eval = len(evaluated)
+        accuracy = evaluated["correct"].mean() if "correct" in evaluated.columns else None
+        brier = evaluated["brier"].mean() if "brier" in evaluated.columns else None
+
+        description += f"\n**Evaluated:** {n_eval} / {total} games\n"
+        if accuracy is not None:
+            description += f"**Accuracy:** {accuracy:.1%}\n"
+        if brier is not None:
+            description += f"**Brier score:** {brier:.4f}\n"
+
+        # Recent trend
+        if n_eval >= 10 and "correct" in evaluated.columns:
+            recent = evaluated.tail(last_n)
+            r_acc = recent["correct"].mean()
+            r_brier = recent["brier"].mean() if "brier" in recent.columns else None
+            description += f"\n**Last {len(recent)}:** {r_acc:.1%} accuracy"
+            if r_brier is not None:
+                description += f", {r_brier:.4f} Brier"
+            description += "\n"
+    else:
+        description += (
+            "\n*No outcomes yet. Run `python -m pipeline.evaluate_history` "
+            "after games complete to see accuracy.*"
+        )
 
     return {
         "title": "📈 Prediction History",
