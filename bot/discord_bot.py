@@ -398,9 +398,10 @@ def run_bot(token: str) -> None:
             rows   = preds.to_dict("records")
             embeds = [format_daily_header(target, len(rows))]
             embeds += [format_game_embed(r) for r in rows]
-            await interaction.followup.send(
-                embeds=[discord.Embed.from_dict(e) for e in embeds[:10]]
-            )
+            # Send in chunks of 10 (Discord limit per message)
+            for i in range(0, len(embeds), 10):
+                chunk = [discord.Embed.from_dict(e) for e in embeds[i : i + 10]]
+                await interaction.followup.send(embeds=chunk)
         except Exception as e:
             logger.error("predictions_cmd error: %s", e)
             await interaction.followup.send(f"Error generating predictions: {e}")

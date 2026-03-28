@@ -152,6 +152,30 @@ A method for explaining **why** the model made a specific prediction. For each f
 
 ---
 
+## Discord Bot
+
+The system delivers predictions through a Discord bot with slash commands.
+
+### /predictions — Game Win Probabilities
+
+Shows each game with win probabilities, pick strength, ELO ratings, and context (back-to-back, rest advantage).
+
+![Predictions command part 1](predictionchat1.png)
+![Predictions command part 2](predictionchat2.png)
+
+### /props — SOG Projections
+
+Shows projected shots on goal for skaters, with recent averages and ice time.
+
+![SOG props command](sogprediction.png)
+
+### Other Commands
+
+- **/elo** — Current ELO rankings for all 32 teams
+- **/history** — Prediction accuracy tracker (win rate, Brier score, calibration)
+
+---
+
 ## Quick Start
 
 ```bash
@@ -167,7 +191,10 @@ python -m pipeline.backfill
 # Train the model
 python -m pipeline.train --model random_forest
 
-# Get today's predictions
+# Daily workflow: refresh data, score old predictions, predict today's games
+python -m pipeline.daily
+
+# Get today's predictions (without refreshing data)
 python -m pipeline.live --dry-run
 
 # Get predictions for a specific date
@@ -211,6 +238,7 @@ NHLAnalyzer/
     train.py                # Train and save production model
     live.py                 # Generate live predictions
     props_live.py           # Player prop predictions
+    daily.py                # One-command daily pipeline (refresh + score + predict)
     evaluate_history.py     # Backfill prediction outcomes
   bot/
     discord_bot.py          # Discord webhook + slash commands
