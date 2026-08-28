@@ -28,12 +28,8 @@ import logging
 import warnings
 from pathlib import Path
 
-import mlflow
-import mlflow.sklearn
 import numpy as np
-import optuna
 import pandas as pd
-import shap
 from dotenv import load_dotenv
 from lightgbm import LGBMClassifier
 from sklearn.ensemble import RandomForestClassifier
@@ -48,7 +44,6 @@ from models.baseline import SEASONS, MLFLOW_DB, load_feature_matrix, walk_forwar
 from models.evaluate import evaluate_fold, summarize_results, print_feature_importance
 
 logger = logging.getLogger(__name__)
-optuna.logging.set_verbosity(optuna.logging.WARNING)
 
 RESULTS_DIR = Path(__file__).parent.parent / "results"
 
@@ -56,9 +51,12 @@ RESULTS_DIR = Path(__file__).parent.parent / "results"
 EXCLUDE_FEATURES = {"home_games_played", "away_games_played", "diff_games_played"}
 _META = {"game_id", "season", "home_team", "away_team", "target", "date", "home_win"}
 
-# Tuning split: train on these, validate on TUNE_VAL_SEASON
-TUNE_TRAIN_SEASONS = ["2021-2022", "2022-2023", "2023-2024"]
-TUNE_VAL_SEASON    = "2024-2025"
+# Tuning split: train on all but the last two seasons, validate on the
+# second-to-last, leaving the most recent season as an untouched holdout for
+# the walk-forward evaluation.  Derived so it advances with each new season
+# instead of tuning against an ever-staler validation year.
+TUNE_VAL_SEASON    = SEASONS[-2]
+TUNE_TRAIN_SEASONS = SEASONS[:-2]
 
 
 def get_feature_columns(df: pd.DataFrame) -> list[str]:
@@ -171,6 +169,11 @@ def tune_model(
     X_val = imp.transform(X_val_raw)
 
     objective_fn = _xgb_objective if model_type == "xgboost" else _lgbm_objective
+
+    # Hyperparameter-search dependency — imported here so the training and
+    # serving paths do not require it.
+    import optuna
+    optuna.logging.set_verbosity(optuna.logging.WARNING)
 
     study = optuna.create_study(
         direction="minimize",
@@ -457,6 +460,10 @@ def compute_shap_summary(
     Compute SHAP values and print/save summary.
     Returns Series of mean |SHAP| per feature.
     """
+    # Explainability-only dependency — imported here so the training and
+    # serving paths do not require it.
+    import shap
+
     logger.info("Computing SHAP values on %d samples ...", len(X))
 
     # For calibrated models, unwrap to get the base estimator
@@ -513,6 +520,11 @@ def log_run_to_mlflow(
     shap_importance: pd.Series | None,
     add_interactions: bool,
 ) -> None:
+    # See models.baseline.log_to_mlflow — kept out of module scope so the
+    # training and serving paths do not depend on mlflow.
+    import mlflow
+    import mlflow.sklearn
+
     MLFLOW_DB.parent.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB}")
     mlflow.set_experiment("nhl_xgboost_phase4")

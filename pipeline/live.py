@@ -20,7 +20,7 @@ import argparse
 import json
 import logging
 import os
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -29,11 +29,15 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from features.team import _add_derived_columns, _add_regulation_wins, ROLL_STATS, WINDOWS, EWM_STATS, EWM_HALFLIFE
+from features.team import (
+    _add_derived_columns, _add_regulation_wins, pregame_snapshot,
+)
 from features.goalie_mp import GOALIE_WINDOWS
 from features.special_teams import ST_WINDOWS
 from features.context import _DIVISIONS, _CONFERENCES
 from ingestion.nhl_api import fetch_schedule
+from config.season import approximate_game_date, current_season, season_start
+from pipeline.evaluate_history import HISTORY_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -41,29 +45,31 @@ PARQUET_DIR  = Path(__file__).parent.parent / "data" / "parquet"
 SAVED_DIR    = Path(__file__).parent.parent / "models" / "saved"
 DEFAULT_MODEL = "random_forest"
 
-# Current season (used to scope rolling windows to recent games)
-CURRENT_SEASON = "2025-2026"
-
-_SEASON_START: dict[str, str] = {
-    "2021-2022": "2021-10-12",
-    "2022-2023": "2022-10-07",
-    "2023-2024": "2023-10-10",
-    "2024-2025": "2024-10-08",
-    "2025-2026": "2025-10-08",
-}
+# Season identity comes from config.season — see docs/SEASON_ROLLOVER.md.
+CURRENT_SEASON = current_season()
 
 
 # ---------------------------------------------------------------------------
 # Rolling stats snapshot
 # ---------------------------------------------------------------------------
 
-def _build_team_snapshot(parquet_path: Optional[Path] = None) -> pd.DataFrame:
+def _build_team_snapshot(
+    parquet_path: Optional[Path] = None,
+    season: Optional[str] = None,
+    teams: Optional[list[str]] = None,
+) -> pd.DataFrame:
     """
-    Return one row per team with rolling pre-game stats.
-    Each row = rolling mean of that team's last 5 / 10 / 20 completed games
-    (across season boundaries — we want their real recent form).
+    Return one row per team with rolling pre-game stats for their next game.
 
-    Also computes EWM features, home/away venue splits, and regulation win.
+    Scoped to a single season and computed by the same code that builds the
+    training matrix (``features.team.pregame_snapshot``).  Both properties
+    matter: training rolls strictly within a season, so a live snapshot that
+    carried form across the season boundary fed the model inputs it had never
+    been trained on — worst of all in October, when every carried-over value
+    came from the previous campaign.
+
+    Teams with no games yet in the season get an all-NaN row, matching what
+    training saw on opening night, instead of being dropped from the slate.
 
     Index: team abbreviation.
     Columns: {stat}_l5, {stat}_l10, {stat}_l20, {stat}_ewm7, {stat}_home_l10,
@@ -71,56 +77,25 @@ def _build_team_snapshot(parquet_path: Optional[Path] = None) -> pd.DataFrame:
     """
     if parquet_path is None:
         parquet_path = PARQUET_DIR / "moneypuck_team_game_stats.parquet"
+    if season is None:
+        season = CURRENT_SEASON
 
     df = pd.read_parquet(parquet_path)
     df = _add_derived_columns(df)
     df = _add_regulation_wins(df)
     df["game_num"] = df["game_id"].str[-4:].astype(int)
-    df = df.sort_values(["team", "season", "game_num"])
 
-    max_w = max(WINDOWS)
-    rows = []
-    for team, grp in df.groupby("team", sort=False):
-        row: dict = {"team": team}
-        recent = grp.tail(max_w)
+    history = df[df["season"] == season].sort_values(["team", "game_num"])
+    if history.empty:
+        logger.warning(
+            "No completed games for %s yet — team features will be NaN-imputed",
+            season,
+        )
 
-        # Standard rolling averages
-        for col in ROLL_STATS:
-            if col not in recent.columns:
-                continue
-            for w in WINDOWS:
-                vals = recent.tail(w)[col].dropna()
-                row[f"{col}_l{w}"] = float(vals.mean()) if len(vals) > 0 else np.nan
-
-        # EWM features (use all available games, ewm naturally weights recent more)
-        for col in EWM_STATS:
-            if col not in grp.columns:
-                continue
-            vals = grp[col].dropna()
-            if len(vals) > 0:
-                row[f"{col}_ewm{EWM_HALFLIFE}"] = float(
-                    vals.ewm(halflife=EWM_HALFLIFE, min_periods=1).mean().iloc[-1]
-                )
-            else:
-                row[f"{col}_ewm{EWM_HALFLIFE}"] = np.nan
-
-        # Home/away venue split rolling (last 10 games at matching venue)
-        for venue, label in [(True, "home"), (False, "away")]:
-            venue_games = grp[grp["is_home"] == venue]
-            recent_venue = venue_games.tail(10)
-            for col in EWM_STATS:
-                if col not in recent_venue.columns:
-                    continue
-                vals = recent_venue[col].dropna()
-                row[f"{col}_{label}_l10"] = float(vals.mean()) if len(vals) > 0 else np.nan
-
-        row["games_played"] = len(grp)
-        rows.append(row)
-
-    snapshot = pd.DataFrame(rows).set_index("team")
+    snapshot = pregame_snapshot(history, teams=teams)
     logger.info(
-        "Team snapshot built: %d teams, %d stat columns",
-        len(snapshot), len(snapshot.columns),
+        "Team snapshot built: %d teams, %d stat columns (season %s, %d games played)",
+        len(snapshot), len(snapshot.columns), season, len(history),
     )
     return snapshot
 
@@ -271,7 +246,6 @@ def _build_opponent_quality_snapshot() -> pd.DataFrame:
 
     # Get home/away oq columns from the latest game per team
     home_oq = [c for c in oq_cols if c.startswith("home_")]
-    away_oq = [c for c in oq_cols if c.startswith("away_")]
 
     rows = []
     # Extract from home-team perspective
@@ -329,11 +303,10 @@ def _team_last_game_date(
     result: dict[str, date] = {}
     for team, grp in df.groupby("team"):
         last = grp.iloc[-1]
-        start_str = _SEASON_START.get(last["season"])
-        if start_str:
-            start = pd.Timestamp(start_str).date()
-            offset = int(last["game_num"] / 1230 * 185)
-            result[team] = start + timedelta(days=offset)
+        try:
+            result[team] = approximate_game_date(last["season"], last["game_num"])
+        except (ValueError, TypeError):
+            logger.warning("Cannot estimate last game date for %s", team)
     return result
 
 
@@ -346,7 +319,7 @@ def _build_context_row(
     away_team: str,
     game_date: date,
     last_game: dict[str, date],
-    season_start: date,
+    season_opener: date,
 ) -> dict:
     """Compute context features for a single scheduled game."""
     def _rest(team: str) -> Optional[float]:
@@ -370,7 +343,7 @@ def _build_context_row(
         "home_back_to_back": 1 if home_rest == 1.0 else 0,
         "away_back_to_back": 1 if away_rest == 1.0 else 0,
         "rest_advantage":    (home_rest or 2.0) - (away_rest or 2.0),
-        "season_day":        float((game_date - season_start).days),
+        "season_day":        float((game_date - season_opener).days),
         "h2h_home_win_rate_l3": np.nan,  # filled below if DB available
         "same_division":     same_div,
         "same_conference":   same_conf,
@@ -426,8 +399,7 @@ def build_live_features(
 
     Returns DataFrame with game_id, home_team, away_team, and all model features.
     """
-    season_start_str = _SEASON_START.get(CURRENT_SEASON, "2025-10-08")
-    season_start = pd.Timestamp(season_start_str).date()
+    opener = season_start(CURRENT_SEASON)
 
     rows = []
     for g in games_today:
@@ -468,7 +440,7 @@ def build_live_features(
             )
 
         # Context
-        ctx = _build_context_row(home, away, game_date, last_game, season_start)
+        ctx = _build_context_row(home, away, game_date, last_game, opener)
         ctx["h2h_home_win_rate_l3"] = _load_h2h(conn, home, away)
         row.update(ctx)
 
@@ -537,25 +509,71 @@ def load_model(model_name: str = DEFAULT_MODEL):
         )
 
     pipeline     = joblib.load(model_path)
-    feature_cols = json.loads(cols_path.read_text())
+    feature_cols = json.loads(cols_path.read_text(encoding="utf-8"))
     logger.info("Loaded model: %s (%d features)", model_name, len(feature_cols))
     return pipeline, feature_cols
 
 
-def predict(live_df: pd.DataFrame, pipeline, feature_cols: list[str]) -> pd.DataFrame:
-    """Apply the saved model. Returns live_df with prob_home_win column added."""
+# A prediction built from mostly-imputed features is not a prediction — it is
+# the training-set mean dressed up as one.  Below this fraction of usable
+# features we refuse to publish rather than emit a confident-looking number.
+MIN_FEATURE_COVERAGE = 0.70
+
+
+def predict(
+    live_df: pd.DataFrame,
+    pipeline,
+    feature_cols: list[str],
+    min_coverage: float = MIN_FEATURE_COVERAGE,
+) -> pd.DataFrame:
+    """Apply the saved model.
+
+    Adds ``prob_home_win`` and ``feature_coverage`` (the fraction of the
+    model's features that were actually populated for that game).  Rows below
+    ``min_coverage`` are dropped: the imputer silently replaces every missing
+    value with a column mean, so a pipeline break upstream used to surface as
+    a plausible-looking 50-something percent rather than as an error.
+    """
+    live_df = live_df.copy()
+
     missing = [c for c in feature_cols if c not in live_df.columns]
     if missing:
         logger.warning(
-            "%d feature(s) missing — will be NaN-imputed: %s",
-            len(missing), missing[:10],
+            "%d/%d feature(s) absent from the live matrix — NaN-imputed: %s",
+            len(missing), len(feature_cols), missing[:10],
         )
         for col in missing:
             live_df[col] = np.nan
 
-    X = live_df[feature_cols].values
-    live_df = live_df.copy()
-    live_df["prob_home_win"] = pipeline.predict_proba(X)[:, 1]
+    X = live_df[feature_cols].apply(pd.to_numeric, errors="coerce")
+    live_df["feature_coverage"] = X.notna().mean(axis=1)
+
+    usable = live_df["feature_coverage"] >= min_coverage
+    if not usable.all():
+        for _, row in live_df[~usable].iterrows():
+            logger.error(
+                "Dropping %s @ %s — only %.0f%% of features available (need %.0f%%)",
+                row.get("away_team"), row.get("home_team"),
+                row["feature_coverage"] * 100, min_coverage * 100,
+            )
+        live_df = live_df[usable].copy()
+        X = X[usable]
+
+    if live_df.empty:
+        logger.error(
+            "No game had enough usable features — check that the feature "
+            "matrix and snapshots were rebuilt (python -m pipeline.daily)",
+        )
+        return live_df
+
+    worst = live_df["feature_coverage"].min()
+    if worst < 1.0:
+        logger.info(
+            "Feature coverage: min %.1f%%, mean %.1f%%",
+            worst * 100, live_df["feature_coverage"].mean() * 100,
+        )
+
+    live_df["prob_home_win"] = pipeline.predict_proba(X.values)[:, 1]
     return live_df
 
 
@@ -563,19 +581,16 @@ def predict(live_df: pd.DataFrame, pipeline, feature_cols: list[str]) -> pd.Data
 # Save prediction history (Parquet — always works, no DB needed)
 # ---------------------------------------------------------------------------
 
-HISTORY_DIR = Path(__file__).parent.parent / "data" / "predictions"
-
-
 def save_prediction_history(predictions: pd.DataFrame, model_name: str) -> Path:
     """Append today's predictions to a Parquet-based history log."""
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    path = HISTORY_DIR / "prediction_history.parquet"
+    path = HISTORY_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     records = predictions[["game_id", "home_team", "away_team", "prob_home_win"]].copy()
     records["model_name"] = model_name
-    records["predicted_at"] = datetime.utcnow().isoformat()
-    # Include ELO if available
-    for col in ["home_elo", "away_elo"]:
+    records["predicted_at"] = datetime.now(timezone.utc).isoformat()
+    # Include ELO and feature coverage if available
+    for col in ["home_elo", "away_elo", "feature_coverage"]:
         if col in predictions.columns:
             records[col] = predictions[col]
 
@@ -609,7 +624,7 @@ def save_predictions_to_db(predictions: pd.DataFrame, conn, model_name: str) -> 
                 "game_id":       str(r["game_id"]),
                 "model_name":    model_name,
                 "prob_home_win": float(r["prob_home_win"]),
-                "predicted_at":  datetime.utcnow(),
+                "predicted_at":  datetime.now(timezone.utc),
             }
             for _, r in predictions.iterrows()
         ]
@@ -643,15 +658,18 @@ def run(
     model_name: str = DEFAULT_MODEL,
     dry_run: bool = False,
     conn=None,
+    min_coverage: float = MIN_FEATURE_COVERAGE,
 ) -> pd.DataFrame:
     """
     Full live prediction pipeline.
 
     Args:
-        target_date: date to predict for (default: today)
-        model_name:  which saved model to use
-        dry_run:     skip DB save if True
-        conn:        optional psycopg2 connection
+        target_date:  date to predict for (default: today)
+        model_name:   which saved model to use
+        dry_run:      skip DB save if True
+        conn:         optional psycopg2 connection
+        min_coverage: drop games with fewer than this fraction of the model's
+                      features populated
 
     Returns:
         DataFrame with game_id, home_team, away_team, prob_home_win, and context cols.
@@ -672,8 +690,11 @@ def run(
         return pd.DataFrame()
     logger.info("Found %d regular-season games", len(reg_games))
 
-    # 2. Team rolling snapshot (last N completed games)
-    snapshot = _build_team_snapshot()
+    # 2. Team rolling snapshot for the current season.  Passing today's teams
+    #    guarantees a row for each, so a team that has not played yet is
+    #    NaN-imputed rather than silently dropped from the slate.
+    slate_teams = sorted({g["home_team"] for g in reg_games} | {g["away_team"] for g in reg_games})
+    snapshot = _build_team_snapshot(teams=slate_teams)
 
     # 2b. Goalie, special teams, ELO, and opponent quality snapshots
     goalie_snapshot = _build_goalie_snapshot()
@@ -701,7 +722,9 @@ def run(
 
     # 5. Load model + predict
     pipeline, feature_cols = load_model(model_name)
-    predictions = predict(live_df, pipeline, feature_cols)
+    predictions = predict(live_df, pipeline, feature_cols, min_coverage=min_coverage)
+    if predictions.empty:
+        return pd.DataFrame()
 
     # 6. Always save prediction history (Parquet)
     save_prediction_history(predictions, model_name)
@@ -714,7 +737,7 @@ def run(
     display_cols = [
         "game_id", "home_team", "away_team", "prob_home_win",
         "home_back_to_back", "away_back_to_back", "rest_advantage",
-        "home_elo", "away_elo",
+        "home_elo", "away_elo", "feature_coverage",
     ]
     keep = [c for c in display_cols if c in predictions.columns]
     return predictions[keep]
@@ -734,6 +757,9 @@ if __name__ == "__main__":
                         choices=["random_forest", "logistic_regression"])
     parser.add_argument("--dry-run", action="store_true",
                         help="Print predictions without saving to DB")
+    parser.add_argument("--min-coverage", type=float, default=MIN_FEATURE_COVERAGE,
+                        help="Drop games with fewer than this fraction of "
+                             "model features populated (0-1)")
     args = parser.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -748,7 +774,10 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning("DB connect failed: %s — running without DB", e)
 
-    preds = run(target_date=target, model_name=args.model, dry_run=args.dry_run, conn=conn)
+    preds = run(
+        target_date=target, model_name=args.model, dry_run=args.dry_run,
+        conn=conn, min_coverage=args.min_coverage,
+    )
 
     if preds.empty:
         print("No predictions generated.")

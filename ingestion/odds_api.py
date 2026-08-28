@@ -15,8 +15,6 @@ import time
 from datetime import date, datetime, timezone
 
 import httpx
-import psycopg2
-import psycopg2.extras
 
 logger = logging.getLogger(__name__)
 
@@ -202,6 +200,10 @@ def parse_odds_records(game: dict) -> list[dict]:
 # Database helpers
 # ---------------------------------------------------------------------------
 def upsert_odds(conn, rows: list[dict]) -> None:
+    # Postgres is optional — the whole pipeline runs on Parquet alone.
+    # Imported here so a machine without psycopg2 can still ingest data.
+    import psycopg2.extras
+
     if not rows:
         return
     sql = """
@@ -299,6 +301,7 @@ def ingest_todays_odds(conn) -> None:
 
 
 if __name__ == "__main__":
+    import psycopg2
     import sys
     logging.basicConfig(level=logging.INFO)
 

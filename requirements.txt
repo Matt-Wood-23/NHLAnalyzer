@@ -34,6 +34,9 @@ playwright>=1.44
 # Discord bot (Phase 5)
 py-cord>=2.0
 
+# Testing
+pytest>=8.0
+
 # Jupyter notebooks
 jupyter>=1.0
 matplotlib>=3.9

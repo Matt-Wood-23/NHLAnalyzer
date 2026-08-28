@@ -85,7 +85,7 @@ def train_and_save(
     cols_path  = SAVED_DIR / f"{model_name}_feature_cols.json"
 
     joblib.dump(pipeline, model_path)
-    cols_path.write_text(json.dumps(feature_cols, indent=2))
+    cols_path.write_text(json.dumps(feature_cols, indent=2), encoding="utf-8")
 
     logger.info("Model saved       → %s", model_path)
     logger.info("Feature cols saved → %s", cols_path)

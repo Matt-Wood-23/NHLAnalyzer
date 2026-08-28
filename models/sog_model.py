@@ -35,12 +35,14 @@ from sklearn.linear_model import PoissonRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from config.season import all_seasons
+
 logger = logging.getLogger(__name__)
 
 PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
 SAVED_DIR   = Path(__file__).parent.parent / "models" / "saved"
 
-SEASONS = ["2021-2022", "2022-2023", "2023-2024", "2024-2025", "2025-2026"]
+SEASONS = all_seasons()
 
 # Features used by the SOG model
 SOG_FEATURE_COLS = [
@@ -213,7 +215,7 @@ def save_sog_model(pipeline: Pipeline, feature_cols: list[str]) -> Path:
     model_path = SAVED_DIR / "sog_model.pkl"
     cols_path  = SAVED_DIR / "sog_model_feature_cols.json"
     joblib.dump(pipeline, model_path)
-    cols_path.write_text(json.dumps(feature_cols, indent=2))
+    cols_path.write_text(json.dumps(feature_cols, indent=2), encoding="utf-8")
     logger.info("SOG model saved → %s", model_path)
     return model_path
 
@@ -225,7 +227,7 @@ def load_sog_model() -> tuple:
         raise FileNotFoundError(
             f"No saved SOG model at {model_path}. Run `python -m models.sog_model --save` first."
         )
-    return joblib.load(model_path), json.loads(cols_path.read_text())
+    return joblib.load(model_path), json.loads(cols_path.read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

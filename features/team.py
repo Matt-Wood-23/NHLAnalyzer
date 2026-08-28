@@ -116,10 +116,79 @@ def _rolling_team_season(grp: pd.DataFrame) -> pd.DataFrame:
     return grp
 
 
+def rolling_feature_columns(df: pd.DataFrame) -> list[str]:
+    """Column names produced by :func:`_rolling_team_season`.
+
+    Single definition shared by the backfill assembler and the live pipeline,
+    so the two can never disagree about which columns are model features.
+    """
+    ewm_suffix = f"_ewm{EWM_HALFLIFE}"
+    return [
+        c for c in df.columns
+        if any(c.endswith(f"_l{w}") for w in WINDOWS)
+        or c.endswith(ewm_suffix)
+        or c.endswith("_home_l10")
+        or c.endswith("_away_l10")
+        or c == "games_played"
+    ]
+
+
+def pregame_snapshot(
+    history: pd.DataFrame,
+    teams: list[str] | None = None,
+) -> pd.DataFrame:
+    """Pre-game rolling features for each team's *next* game.
+
+    Appends a placeholder row per team to that team's game history and runs
+    the identical :func:`_rolling_team_season` used to build the training
+    matrix, then returns the placeholder's rolling values.  Because the
+    training and serving features come out of the same function, they cannot
+    drift apart — previously the live pipeline re-implemented the rolling
+    logic and disagreed with training on season boundaries and on the venue
+    split window.
+
+    Args:
+        history: per-game rows for a *single season*, with the raw stat
+                 columns, ``team``, ``is_home`` and ``game_num``.
+        teams:   teams that must appear in the result.  Teams with no games
+                 yet get an all-NaN row instead of being dropped, which is
+                 what training saw for the opening night of every season.
+
+    Returns:
+        DataFrame indexed by team, one column per rolling feature.
+    """
+    wanted = sorted(set(teams or []) | set(history["team"].unique()))
+
+    next_game_num = int(history["game_num"].max()) + 1 if len(history) else 1
+    stat_cols = [c for c in set(ROLL_STATS) | set(EWM_STATS) if c in history.columns]
+
+    rows = []
+    for team in wanted:
+        grp = history[history["team"] == team].sort_values("game_num")
+
+        placeholder = {c: np.nan for c in stat_cols}
+        placeholder.update({"team": team, "is_home": True, "game_num": next_game_num})
+        with_placeholder = pd.concat(
+            [grp, pd.DataFrame([placeholder])], ignore_index=True,
+        )
+
+        rolled = _rolling_team_season(with_placeholder)
+        feature_cols = rolling_feature_columns(rolled)
+        row = rolled.iloc[-1][feature_cols].to_dict()
+        row["team"] = team
+        rows.append(row)
+
+    return pd.DataFrame(rows).set_index("team")
+
+
 def _add_regulation_wins(df: pd.DataFrame) -> pd.DataFrame:
     """
     Determine which games went to OT/SO from raw MoneyPuck shot CSVs.
-    Sets regulation_win = 1 if team won AND game ended in regulation (max period <= 3).
+    Sets regulation_win = 1 if team won AND game ended in regulation (max period <= 3),
+    and went_to_ot = 1 for any game that went past the third period.
+
+    ``went_to_ot`` is a post-game fact, so it is never rolled into a feature —
+    the ELO updater uses it to discount coin-flip OT/SO results.
     """
     from ingestion.moneypuck import MP_SEASONS, mp_game_id_to_nhl
 
@@ -144,6 +213,7 @@ def _add_regulation_wins(df: pd.DataFrame) -> pd.DataFrame:
     logger.info("Identified %d OT/SO games across all seasons", len(ot_games))
 
     went_to_ot = df["game_id"].isin(ot_games)
+    df["went_to_ot"] = went_to_ot.astype(float)
     df["regulation_win"] = np.where(
         df["won"] == 1.0,
         np.where(went_to_ot, 0.0, 1.0),

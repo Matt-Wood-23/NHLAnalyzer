@@ -23,8 +23,6 @@ import logging
 import os
 from pathlib import Path
 
-import mlflow
-import mlflow.sklearn
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -35,6 +33,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from models.evaluate import evaluate_fold, summarize_results, print_feature_importance
+from config.season import all_seasons
 
 logger = logging.getLogger(__name__)
 
@@ -45,8 +44,8 @@ MLFLOW_DB   = Path(__file__).parent.parent / "mlruns" / "mlflow.db"
 _META = {"game_id", "season", "home_team", "away_team", "target",
          "date", "home_win"}
 
-# Season ordering (chronological)
-SEASONS = ["2021-2022", "2022-2023", "2023-2024", "2024-2025", "2025-2026"]
+# Season ordering (chronological) — extends automatically each year.
+SEASONS = all_seasons()
 
 
 def load_feature_matrix(path: Path | None = None) -> pd.DataFrame:
@@ -166,6 +165,12 @@ def log_to_mlflow(
     df: pd.DataFrame,
 ) -> None:
     """Log fold metrics, aggregate metrics, and feature importance to MLflow."""
+    # Imported here rather than at module scope: mlflow is an experiment-
+    # tracking dependency, and pipeline.train only needs this module for its
+    # feature-column helpers.  A missing mlflow should not block training.
+    import mlflow
+    import mlflow.sklearn
+
     MLFLOW_DB.parent.mkdir(parents=True, exist_ok=True)
     mlflow.set_tracking_uri(f"sqlite:///{MLFLOW_DB}")
     mlflow.set_experiment("nhl_baseline_models")

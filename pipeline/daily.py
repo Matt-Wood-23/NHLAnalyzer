@@ -25,23 +25,29 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from config.season import current_season, current_season_year
+
 logger = logging.getLogger(__name__)
 
 RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 
-# MoneyPuck cache file for the current season
-CURRENT_SEASON_YEAR = "2025"
-CACHE_FILE = RAW_DIR / f"moneypuck_shots_{CURRENT_SEASON_YEAR}.csv"
+
+def current_season_cache_file() -> Path:
+    """MoneyPuck shot cache for the season in progress (resolved at call time)."""
+    return RAW_DIR / f"moneypuck_shots_{current_season_year()}.csv"
 
 
 def refresh_data(conn=None):
     """Delete stale MoneyPuck cache, re-download, and rebuild feature matrix."""
     from ingestion.moneypuck import ingest_all_seasons
 
-    # Step 1: Delete stale cache so MoneyPuck re-downloads with latest games
-    if CACHE_FILE.exists():
-        CACHE_FILE.unlink()
-        logger.info("Deleted stale cache: %s", CACHE_FILE.name)
+    # Step 1: Delete stale cache so MoneyPuck re-downloads with latest games.
+    # Only the current season's file is dropped — prior seasons never change.
+    cache_file = current_season_cache_file()
+    logger.info("Current season: %s", current_season())
+    if cache_file.exists():
+        cache_file.unlink()
+        logger.info("Deleted stale cache: %s", cache_file.name)
     else:
         logger.info("No cache to delete — will download fresh")
 
@@ -51,10 +57,17 @@ def refresh_data(conn=None):
 
     # Step 3: Rebuild the full feature matrix
     logger.info("Rebuilding feature matrix...")
-    from pipeline.backfill import build_feature_matrix, save_feature_matrix
+    from pipeline.backfill import (
+        build_feature_matrix, build_player_game_stats, save_feature_matrix,
+    )
     matrix = build_feature_matrix(conn=conn)
     save_feature_matrix(matrix)
     logger.info("Feature matrix rebuilt: %d games x %d cols", *matrix.shape)
+
+    # Step 4: Player-level stats — the SOG props model both trains and
+    # predicts from these, so they must refresh with everything else.
+    logger.info("Rebuilding player game stats...")
+    build_player_game_stats()
 
 
 def score_predictions():

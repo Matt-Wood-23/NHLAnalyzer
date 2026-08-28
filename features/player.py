@@ -23,9 +23,9 @@ import pandas as pd
 from ingestion.player_stats import (
     load_player_game_stats,
     fetch_player_game_log,
-    game_log_to_dataframe,
     toi_to_seconds,
 )
+from config.season import current_season_api
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +94,74 @@ def build_player_rolling_features(
     return result
 
 
+def pregame_player_snapshot(
+    history: pd.DataFrame,
+    player_ids: list[int] | None = None,
+) -> pd.DataFrame:
+    """Pre-game rolling features for each player's *next* game.
+
+    The serving counterpart to :func:`build_player_rolling_features`, built
+    the same way :func:`features.team.pregame_snapshot` is: append a
+    placeholder row per player and run the identical :func:`_rolling_player`
+    used to build the training matrix, then read the placeholder's values.
+
+    This exists because the live props path used to compute what it could
+    from the NHL API game log and hardcode the rest to NaN — xg,
+    shot_attempts and xg_per_attempt are not exposed by that API. Six of the
+    SOG model's eleven features were therefore mean-imputed on every
+    projection, even though the values were sitting in
+    player_game_stats.parquet, which is what the model was trained on.
+
+    Args:
+        history: player-game rows from player_game_stats.parquet, with the
+                 raw stat columns, ``player_id``, ``season`` and ``game_num``.
+                 Rolling deliberately spans seasons here, matching training —
+                 a shooter's rate carries over, and players change teams.
+        player_ids: players who must appear in the result.  Those with no
+                 history get an all-NaN row rather than being dropped.
+
+    Returns:
+        DataFrame indexed by player_id, one column per rolling feature.
+    """
+    history = history.copy()
+    if "game_num" not in history.columns:
+        history["game_num"] = history["game_id"].astype(str).str[-4:].astype(int)
+
+    wanted = sorted(set(player_ids or []) | set(history["player_id"].unique()))
+    stat_cols = [c for c in PLAYER_ROLL_STATS if c in history.columns]
+    feature_cols = [f"{c}_l{w}" for c in stat_cols for w in PLAYER_WINDOWS]
+
+    next_game_num = int(history["game_num"].max()) + 1 if len(history) else 1
+
+    rows = []
+    for player_id in wanted:
+        grp = history[history["player_id"] == player_id].sort_values(
+            ["season", "game_num"]
+        )
+
+        placeholder = {c: np.nan for c in stat_cols}
+        placeholder.update({"player_id": player_id, "game_num": next_game_num})
+        with_placeholder = pd.concat(
+            [grp, pd.DataFrame([placeholder])], ignore_index=True,
+        )
+
+        rolled = _rolling_player(with_placeholder)
+        row = rolled.iloc[-1][feature_cols].to_dict()
+        row["player_id"] = player_id
+        row["games_played"] = len(grp)
+        # Carry identity from the player's most recent game.
+        for col in ("player_name", "team", "position"):
+            row[col] = grp[col].iloc[-1] if len(grp) and col in grp.columns else None
+        rows.append(row)
+
+    snapshot = pd.DataFrame(rows).set_index("player_id")
+    logger.info(
+        "Player snapshot built: %d players, %d feature columns",
+        len(snapshot), len(feature_cols),
+    )
+    return snapshot
+
+
 # ---------------------------------------------------------------------------
 # Live snapshot: rolling stats from current-season API game logs
 # ---------------------------------------------------------------------------
@@ -123,7 +191,7 @@ def _parse_toi_log(game_log: list[dict], player_id: int, player_name: str) -> pd
 
 def build_live_player_snapshot(
     players: list[dict],
-    season: str = "20252026",
+    season: str | None = None,
     max_window: int = 20,
 ) -> pd.DataFrame:
     """
@@ -132,12 +200,14 @@ def build_live_player_snapshot(
 
     Args:
         players: list of dicts with keys: id, name, team, position
-        season:  NHL API season string (e.g. "20252026")
+        season:  NHL API season string (e.g. "20252026"); defaults to current
         max_window: how many recent games to look back
 
     Returns:
         DataFrame indexed by player_id with rolling stat columns.
     """
+    season = season or current_season_api()
+
     rows = []
     for p in players:
         if p.get("position") == "G":

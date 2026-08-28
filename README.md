@@ -74,6 +74,8 @@ Fold 4: Train on 2021-22 through 2024-25          -> Test on 2025-26
 
 This simulates real-world usage: the model only ever sees past data when making predictions. The "WAVG" (weighted average) combines all folds, weighting by how many games each fold had.
 
+The fold list is derived from `config/season.py`, so it extends by itself each season — as does the XGBoost hyperparameter tuning split, which always validates on the second-most-recent season and leaves the newest one as an untouched holdout.
+
 ---
 
 ## Understanding the Features
@@ -101,6 +103,10 @@ A chess-style rating system adapted for hockey. Every team starts at 1500 and ga
 - A team at **1600+** is elite (think top playoff contenders)
 - A team at **1400 or below** is struggling
 - The gap between two teams' ELO ratings is the strongest single predictor of who wins
+
+**Overtime and shootout wins count for less.** Around a quarter of NHL games are decided after regulation, and those finishes are close to a coin flip — 3-on-3 and shootouts say far less about which team is better than a regulation result does. Counting them as full wins pushes that noise straight into the model's most important feature, so an OT/SO winner is credited `ot_win_value` (default 0.6) rather than 1.0. The value is part of the tuning grid, and `ot_win_value = 1.0` reproduces the older behaviour, so tuning can only select it if it genuinely helps.
+
+Tuned ELO parameters are saved to `models/saved/elo_params.json` by `python -m features.elo` and read back by the backfill and live pipelines — previously the tuner printed its results and the pipeline carried on using the module defaults.
 
 ### Special Teams (PP/PK)
 - **PP (Power Play)** — How well does a team score when they have a man advantage?
@@ -152,6 +158,46 @@ A method for explaining **why** the model made a specific prediction. For each f
 
 ---
 
+## Reliability
+
+Two guardrails sit between the model and what gets posted.
+
+### Training and serving share one code path
+
+The rolling features for a live game are produced by the same function that
+builds the training matrix (`features.team.pregame_snapshot`), rather than a
+parallel re-implementation. This matters most in October: training rolls
+stats strictly within a season, so a live snapshot that carried form across
+the season boundary would feed the model inputs it had never been trained
+on. `tests/test_team_features.py::TestTrainServeParity` asserts the two
+agree on every rolling column.
+
+A team with no games yet gets an all-NaN row instead of being dropped, which
+is exactly what the model saw for opening night during training — and means
+no game silently disappears from the first few days of the schedule.
+
+### Feature coverage guard
+
+The model pipeline imputes missing values with column means, so an upstream
+break used to surface as a plausible-looking 50-something percent rather
+than as an error. Every prediction now carries a `feature_coverage` score —
+the fraction of the model's features that were actually populated — and
+games below 70% are dropped rather than published. The threshold is
+adjustable:
+
+```bash
+python -m pipeline.live --dry-run --min-coverage 0.9
+```
+
+Coverage is written to the prediction history alongside each pick, so
+degradation is visible after the fact rather than only in the logs.
+
+One consequence worth knowing: on the opening night of a season no team has
+any rolling history, so coverage is very low and the guard withholds those
+games. Predictions resume on their own as games accumulate. To publish
+ELO-and-context-only picks from night one instead, pass a lower threshold —
+see [docs/SEASON_ROLLOVER.md](docs/SEASON_ROLLOVER.md).
+
 ## Discord Bot
 
 The system delivers predictions through a Discord bot with slash commands.
@@ -167,12 +213,51 @@ Shows each game with win probabilities, pick strength, ELO ratings, and context 
 
 Shows projected shots on goal for skaters, with recent averages and ice time.
 
+Player features are served from `player_game_stats.parquet` — the same file the
+SOG model trains on, aggregated from the MoneyPuck shot data. That matters:
+the NHL API game log has no expected-goals data, so building live features from
+it left `xg`, `shot_attempts` and `xg_per_attempt` empty across both windows —
+six of the model's eleven inputs replaced by training-set means on every
+projection. The NHL API is still used for rosters and ice time, neither of
+which the model consumes. Opponent context comes from the same team snapshot
+the training matrix uses, so the two agree on what `opp_sf_pct_l20` means.
+
+Projections are subject to the same coverage guard as game predictions.
+
 ![SOG props command](sogprediction.png)
 
 ### Other Commands
 
 - **/elo** — Current ELO rankings for all 32 teams
-- **/history** — Prediction accuracy tracker (win rate, Brier score, calibration)
+- **/history** — Prediction accuracy tracker, scoped to one season
+
+`/history` answers the question a raw accuracy number cannot: **is the model
+actually adding anything?** Home teams win around 54% of NHL games, so it
+reports accuracy against an always-pick-the-home-team baseline and Brier
+against the no-skill score for the same games. It also breaks results down by
+the pick-strength labels the bot puts on live picks — so you can see whether a
+"Strong Pick" really does win more often than a "Lean" — and shows the
+calibration table that was previously only visible in terminal output.
+
+```
+/history                      # current season (or the latest with data)
+/history season:2025-2026     # a specific season
+/history season:all           # everything logged
+/history last:50              # widen the recent-form window
+```
+
+Predictions are tagged with their season, derived from the game ID, so
+seasons never pool into one lifetime figure — a good year cannot hide a bad
+one, and results from differently-trained models stay separate. The command
+is read-only; scoring is written by `pipeline.daily`.
+
+> **The prediction log is committed.** `data/predictions/` is tracked in git,
+> unlike `data/raw/` and `data/parquet/`, which are rebuilt from MoneyPuck. It
+> is the one file here that cannot be regenerated, so the repo doubles as its
+> backup — commit it after a run. Because it is an append-only binary, only one
+> machine should write it; if two ever diverge, git cannot merge them and the
+> newer file has to be chosen by hand. Nothing breaks if it is missing; the log
+> simply starts over from the next prediction.
 
 ---
 
@@ -181,6 +266,9 @@ Shows projected shots on goal for skaters, with recent averages and ice time.
 ```bash
 # Install dependencies
 pip install -r requirements.txt
+
+# Run the test suite (synthetic data only — no network, no Postgres)
+pytest
 
 # Set environment variables (optional — works without Postgres)
 # DATABASE_URL=postgresql://localhost/nhl_ml
@@ -208,12 +296,26 @@ DISCORD_BOT_TOKEN=... python -m bot.discord_bot --bot
 
 # Evaluate prediction accuracy over time
 python -m pipeline.evaluate_history
+
+# Tune ELO parameters and persist them for the pipelines to use
+python -m features.elo
 ```
+
+Postgres is optional throughout — every path falls back to Parquet, and the
+`psycopg2` driver is only imported when a `DATABASE_URL` is actually set.
+
+### Starting a new season
+
+Adding the new season's opening date to `config/season.py` is the only edit
+required; everything else derives from it and the current date. See
+[docs/SEASON_ROLLOVER.md](docs/SEASON_ROLLOVER.md) for the full checklist.
 
 ## Project Structure
 
 ```
 NHLAnalyzer/
+  config/
+    season.py               # Single source of truth for seasons + start dates
   data/
     raw/                    # MoneyPuck CSV downloads (cached)
     parquet/                # Processed data files
@@ -230,7 +332,8 @@ NHLAnalyzer/
     baseline.py             # RF + Logistic Regression baselines
     xgboost_model.py        # XGBoost + LightGBM + ensemble
     stacking.py             # Stacking meta-learner
-    sog_model.py            # Shots on goal (player props)
+    sog_model.py            # Shots on goal (player props) — trains and
+                            #   predicts from player_game_stats.parquet
     evaluate.py             # Evaluation metrics framework
     saved/                  # Serialized trained models
   pipeline/
@@ -246,5 +349,8 @@ NHLAnalyzer/
     moneypuck.py            # MoneyPuck data downloader
     nhl_api.py              # NHL Stats API client
     odds_api.py             # Odds API client
+  tests/                    # Pytest suite (synthetic data, no network/DB)
+  docs/
+    SEASON_ROLLOVER.md      # Pre-season checklist
   results/                  # Model evaluation reports
 ```

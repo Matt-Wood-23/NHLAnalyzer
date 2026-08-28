@@ -14,6 +14,8 @@ from typing import Optional
 
 import pandas as pd
 
+from config.season import approximate_game_date
+
 logger = logging.getLogger(__name__)
 
 # NHL division/conference structure (2021-22 onwards, post-Seattle expansion)
@@ -40,16 +42,10 @@ _CONFERENCES: dict[str, str] = {
     for team, div in _DIVISIONS.items()
 }
 
-# Approximate season start dates for date estimation fallback
-_SEASON_STARTS: dict[str, str] = {
-    "2021-2022": "2021-10-12",
-    "2022-2023": "2022-10-07",
-    "2023-2024": "2023-10-10",
-    "2024-2025": "2024-10-08",
-}
-# NHL regular season spans roughly 185 days, with ~1230 total games
-_SEASON_DAYS = 185
-_TOTAL_GAMES  = 1230
+# Season start dates and the game_id -> date estimator now live in
+# config.season, so they cannot drift out of sync with the rest of the
+# pipeline (this table used to silently lag a season behind, which blanked
+# out rest / back-to-back / season_day for every game of the newest season).
 
 
 def _load_game_dates_from_db(conn) -> pd.DataFrame:
@@ -77,12 +73,11 @@ def _approximate_dates(team_features: pd.DataFrame) -> pd.DataFrame:
     )
 
     def _estimate(row: pd.Series) -> pd.Timestamp:
-        start_str = _SEASON_STARTS.get(row["season"])
-        if start_str is None:
+        try:
+            return pd.Timestamp(approximate_game_date(row["season"], row["game_num"]))
+        except (ValueError, TypeError):
+            logger.warning("Cannot estimate date for season %r", row["season"])
             return pd.NaT
-        start = pd.Timestamp(start_str)
-        day_offset = int(row["game_num"] / _TOTAL_GAMES * _SEASON_DAYS)
-        return start + pd.Timedelta(days=day_offset)
 
     games["date"] = games.apply(_estimate, axis=1)
     games["home_win"] = None  # unknown without DB

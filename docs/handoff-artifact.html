@@ -1,0 +1,681 @@
+<title>NHLAnalyzer Pre-Season Handoff</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --ground:   #EFF3F6;
+    --surface:  #FFFFFF;
+    --sunken:   #E4EAEF;
+    --ink:      #0F1922;
+    --ink-soft: #33434F;
+    --muted:    #5C6B78;
+    --line:     #D3DCE3;
+    --line-soft:#E2E9EE;
+    --accent:   #BE2F2A;
+    --good:     #2C6A52;
+    --good-bg:  #DDEBE4;
+    --warn:     #8C6220;
+    --warn-bg:  #F2E8D6;
+    --crit-bg:  #F5DEDC;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 64ch;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #0C131A;
+      --surface:  #121C25;
+      --sunken:   #18242E;
+      --ink:      #E5EDF3;
+      --ink-soft: #C0CCD6;
+      --muted:    #8B9AA7;
+      --line:     #24323E;
+      --line-soft:#1B2731;
+      --accent:   #E56A63;
+      --good:     #5EA684;
+      --good-bg:  #172C24;
+      --warn:     #C7A063;
+      --warn-bg:  #2B2318;
+      --crit-bg:  #2E1917;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #0C131A;
+    --surface:  #121C25;
+    --sunken:   #18242E;
+    --ink:      #E5EDF3;
+    --ink-soft: #C0CCD6;
+    --muted:    #8B9AA7;
+    --line:     #24323E;
+    --line-soft:#1B2731;
+    --accent:   #E56A63;
+    --good:     #5EA684;
+    --good-bg:  #172C24;
+    --warn:     #C7A063;
+    --warn-bg:  #2B2318;
+    --crit-bg:  #2E1917;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 17px;
+    line-height: 1.65;
+    margin: 0;
+    padding: 0 20px 96px;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: var(--measure);
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 44px;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    padding: 64px 0 0;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(34px, 8vw, 52px);
+    line-height: 1.04;
+    letter-spacing: -0.022em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  .standfirst {
+    font-size: 19px;
+    line-height: 1.55;
+    color: var(--ink-soft);
+    margin: 0;
+  }
+
+  .facts {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(128px, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    margin-top: 6px;
+  }
+
+  .fact {
+    background: var(--surface);
+    padding: 14px 16px;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .fact dt {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .fact dd {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 21px;
+    letter-spacing: -0.01em;
+    font-variant-numeric: tabular-nums;
+    margin: 0;
+  }
+
+  .fact dd.small {
+    font-family: var(--mono);
+    font-size: 12.5px;
+    font-weight: 400;
+    line-height: 1.4;
+    letter-spacing: 0;
+    word-break: break-all;
+  }
+
+  /* ---------- sections ---------- */
+
+  section {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+  }
+
+  h2 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 13px;
+    letter-spacing: 0.13em;
+    text-transform: uppercase;
+    color: var(--ink);
+    margin: 0;
+    padding-bottom: 12px;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 21px;
+    line-height: 1.25;
+    letter-spacing: -0.012em;
+    text-wrap: balance;
+    margin: 0;
+  }
+
+  p { margin: 0; }
+
+  a {
+    color: var(--accent);
+    text-underline-offset: 3px;
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.855em;
+    background: var(--sunken);
+    padding: 1px 5px;
+    border-radius: 2px;
+    word-break: break-word;
+  }
+
+  strong { font-weight: 600; }
+
+  /* ---------- findings ---------- */
+
+  .finding {
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+    padding-top: 22px;
+    border-top: 1px solid var(--line);
+  }
+
+  .finding:first-of-type { border-top: none; padding-top: 0; }
+
+  .chip {
+    align-self: flex-start;
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 3px 8px;
+    border-radius: 2px;
+  }
+
+  .chip.fixed   { background: var(--good-bg); color: var(--good); }
+  .chip.bug     { background: var(--crit-bg); color: var(--accent); }
+  .chip.pending { background: var(--warn-bg); color: var(--warn); }
+
+  .was {
+    font-size: 15.5px;
+    color: var(--muted);
+    border-left: 2px solid var(--line);
+    padding-left: 14px;
+  }
+
+  /* ---------- ordered steps ---------- */
+
+  ol.steps {
+    list-style: none;
+    counter-reset: step;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+  }
+
+  ol.steps > li {
+    counter-increment: step;
+    display: grid;
+    grid-template-columns: 30px 1fr;
+    gap: 14px;
+    align-items: start;
+  }
+
+  ol.steps > li::before {
+    content: counter(step);
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: 14px;
+    font-variant-numeric: tabular-nums;
+    color: var(--accent);
+    border-top: 2px solid var(--accent);
+    padding-top: 5px;
+  }
+
+  .step-body { display: flex; flex-direction: column; gap: 9px; }
+
+  pre {
+    font-family: var(--mono);
+    font-size: 13px;
+    line-height: 1.62;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 13px 15px;
+    margin: 0;
+    overflow-x: auto;
+  }
+
+  pre code { background: none; padding: 0; font-size: inherit; }
+
+  /* ---------- plain lists ---------- */
+
+  ul.plain {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 13px;
+  }
+
+  ul.plain > li {
+    display: grid;
+    grid-template-columns: 15px 1fr;
+    gap: 11px;
+    align-items: baseline;
+  }
+
+  ul.plain > li::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background: var(--line);
+    transform: translateY(-2px);
+  }
+
+  ul.plain.yes > li::before { background: var(--good); }
+  ul.plain.no  > li::before { background: var(--warn); }
+
+  /* ---------- callout ---------- */
+
+  .callout {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--accent);
+    padding: 20px 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+  }
+
+  .callout h3 { font-size: 18px; }
+
+  /* ---------- open items ---------- */
+
+  .item {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 20px 0;
+    border-top: 1px solid var(--line-soft);
+  }
+
+  .item-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  .item h3 { font-size: 18px; }
+
+  .rank {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  footer {
+    border-top: 2px solid var(--ink);
+    padding-top: 18px;
+    font-size: 14.5px;
+    color: var(--muted);
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  @media (max-width: 480px) {
+    body { font-size: 16px; padding: 0 16px 72px; }
+    .masthead { padding-top: 44px; }
+    .wrap { gap: 38px; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <p class="eyebrow">Handoff &middot; August 2026</p>
+    <h1>Pre-season work on NHLAnalyzer</h1>
+    <p class="standfirst">
+      Five commits getting the pipeline ready for 2026&ndash;27. Four real bugs
+      found along the way, three of them silent. Nothing here has been run
+      against your real data yet.
+    </p>
+    <dl class="facts">
+      <div class="fact">
+        <dt>Commits</dt>
+        <dd>5</dd>
+      </div>
+      <div class="fact">
+        <dt>Files</dt>
+        <dd>37</dd>
+      </div>
+      <div class="fact">
+        <dt>Tests</dt>
+        <dd>131</dd>
+      </div>
+      <div class="fact">
+        <dt>Branch</dt>
+        <dd class="small">claude/pre-season-improvements-pn03zy</dd>
+      </div>
+    </dl>
+  </header>
+
+  <section>
+    <h2>Before you pull</h2>
+    <div class="callout">
+      <h3>Back up the prediction log first</h3>
+      <p>
+        One of these commits stops tracking
+        <code>data/predictions/prediction_history.parquet</code> in git. It is the
+        only file here that cannot be rebuilt &mdash; everything else regenerates
+        from MoneyPuck.
+      </p>
+    </div>
+    <ol class="steps">
+      <li>
+        <div class="step-body">
+          <p><strong>Copy the log somewhere safe.</strong></p>
+<pre><code>cp data/predictions/prediction_history.parquet \
+   ~/nhl_history_backup.parquet</code></pre>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <p><strong>Pull, then check the file survived.</strong> If git reports a
+          conflict on that path, resolve it with
+          <code>git rm --cached data/predictions/prediction_history.parquet</code>
+          &mdash; the working file stays put.</p>
+<pre><code>git pull
+ls data/predictions/</code></pre>
+        </div>
+      </li>
+      <li>
+        <div class="step-body">
+          <p><strong>Rebuild and see the real numbers.</strong> The daily run now
+          also builds the player stats the props fix depends on.</p>
+<pre><code>python -m pipeline.daily
+python -m pipeline.evaluate_history --season 2025-2026</code></pre>
+        </div>
+      </li>
+    </ol>
+  </section>
+
+  <section>
+    <h2>What was broken</h2>
+
+    <article class="finding">
+      <span class="chip fixed">Fixed</span>
+      <h3>Season dates were a year behind, blanking a whole season of features</h3>
+      <p class="was">
+        The start-date table in <code>features/context.py</code> ended at
+        2024&ndash;25. Every 2025&ndash;26 game got a null date, so rest days,
+        back-to-back and season-day were NaN across the newest season of
+        training data. No error, no warning.
+      </p>
+      <p>
+        The season list, current season and opening dates lived in ten files in
+        three different formats. They now derive from one table in
+        <code>config/season.py</code>. Rolling to a new season is a one-line
+        edit, and forgetting it degrades to an October estimate with a warning
+        rather than nulls. A test fails the build if any module hardcodes a
+        season literal again.
+      </p>
+    </article>
+
+    <article class="finding">
+      <span class="chip fixed">Fixed</span>
+      <h3>Live predictions used features the model was never trained on</h3>
+      <p class="was">
+        Training rolled team stats strictly within a season. The live pipeline
+        re-implemented that logic and rolled across season boundaries, with a
+        different venue-split window. Worst in October, when every carried-over
+        value came from the previous season.
+      </p>
+      <p>
+        Serving features are now produced by appending a placeholder row to the
+        history and running <em>the same function that builds the training
+        matrix</em>. Verified identical across all 70 team columns and all 8
+        player columns. <strong>Keep this pattern:</strong> add a feature to the
+        training function and let the snapshot inherit it, rather than computing
+        it separately on the serving side.
+      </p>
+    </article>
+
+    <article class="finding">
+      <span class="chip fixed">Fixed</span>
+      <h3>/props was running on 5 of its 11 features</h3>
+      <p class="was">
+        Six features were hardcoded to NaN, commented &ldquo;not in NHL
+        API&rdquo;. True &mdash; but the SOG model doesn&rsquo;t train on the NHL
+        API. It trains on <code>player_game_stats.parquet</code>, built from
+        MoneyPuck shot data already sitting on disk, which carries per-player
+        expected goals.
+      </p>
+      <p>
+        More than half the model&rsquo;s inputs were replaced by training-set
+        averages on every projection. Coverage went 45% &rarr; 100% in testing.
+        The parquet was also only ever built by running
+        <code>ingestion.player_stats</code> by hand, so the props training data
+        had been drifting out of date with everything refreshed daily beside it
+        &mdash; <code>backfill</code> and <code>daily</code> now rebuild it.
+      </p>
+    </article>
+
+    <article class="finding">
+      <span class="chip fixed">Fixed</span>
+      <h3>/history rewrote a data file every time it was called</h3>
+      <p class="was">
+        The Discord command called <code>backfill_outcomes()</code>, writing to
+        the prediction parquet on every invocation &mdash; racing the daily
+        pipeline. Re-scoring could also erase stored outcomes whenever the
+        feature matrix was absent.
+      </p>
+      <p>
+        Scoring is read-only in the bot now; the daily pipeline owns the writes.
+        Played results are preserved and only refreshed, never dropped.
+      </p>
+    </article>
+  </section>
+
+  <section>
+    <h2>What /history shows now</h2>
+    <p>
+      It reported a lifetime accuracy number with nothing to read it against.
+      Home teams win roughly 54% of NHL games, so accuracy alone can&rsquo;t tell
+      you whether the model found anything.
+    </p>
+    <ul class="plain">
+      <li><strong>Baselines.</strong> Accuracy against always-picking-home, Brier
+      against the no-skill score, both from the same games.</li>
+      <li><strong>Season-scoped.</strong> Seasons are derived from the game ID, so
+      2026&ndash;27 won&rsquo;t pool into 2025&ndash;26. Works retroactively on
+      rows already logged.</li>
+      <li><strong>Calibration</strong>, which the report already computed but the
+      bot never displayed.</li>
+      <li><strong>Pick-strength breakdown</strong>, answering the question the
+      Strong Pick / Lean / Toss-Up labels invite. The labels and the breakdown
+      now share one definition, so it genuinely checks them.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Verified &amp; not</h2>
+    <p>
+      Everything below was tested end-to-end on synthetic data &mdash; no
+      network, no Postgres.
+    </p>
+    <ul class="plain yes">
+      <li>Context features are populated across every season, including the
+      newest. The date bug is gone.</li>
+      <li>Training and serving agree on every feature column, in both the game
+      and props pipelines.</li>
+      <li>ELO carries no leakage, stays zero-sum, and reproduces the old
+      behaviour exactly at <code>ot_win_value = 1.0</code>.</li>
+      <li>An old-format history file upgrades with no row or outcome loss.</li>
+    </ul>
+    <p style="margin-top:6px">Still needs your real data:</p>
+    <ul class="plain no">
+      <li><strong>Whether the overtime discount actually helps.</strong> Roughly a
+      quarter of games are decided after regulation and those are near coin
+      flips, but crediting them as full wins was pushing that noise into the
+      model&rsquo;s most important feature. Unvalidated &mdash;
+      <code>python -m features.elo</code> will settle it, and the old behaviour
+      is in the tuning grid so it can only win if it deserves to.</li>
+      <li><strong>Whether any of this changes real accuracy.</strong> The parity
+      fixes are correctness fixes, not guaranteed accuracy wins.</li>
+      <li><strong>The numbers I quoted earlier.</strong> 55.7% against a 57.1%
+      baseline, Strong Picks at 72%, Leans at 39% &mdash; all from the stale
+      85-row March snapshot in the repo, not your season. Illustrative only.
+      Re-derive them on the real log.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Two things that will bite</h2>
+    <ul class="plain">
+      <li><strong>The saved model files are tracked in git.</strong> Running
+      <code>pipeline.train</code> or <code>models.sog_model</code> overwrites
+      <code>models/saved/*.pkl</code>. I clobbered them twice while testing and
+      had to restore from git. Check <code>git status</code> after any training
+      run.</li>
+      <li><strong>The repo is no longer a backup for the prediction log.</strong>
+      Back it up elsewhere and carry it across machines.</li>
+    </ul>
+  </section>
+
+  <section>
+    <h2>Open items</h2>
+
+    <div class="item">
+      <div class="item-head">
+        <h3>Confirmed goalie starters</h3>
+        <span class="rank">largest accuracy gain</span>
+      </div>
+      <p>
+        The pipeline uses each team&rsquo;s most recent starter. Actual starters
+        are announced pre-game and backups start roughly a third of games.
+        Goaltending is among the biggest single-game swing factors. Needs a
+        reliable pre-game source.
+      </p>
+    </div>
+
+    <div class="item">
+      <div class="item-head">
+        <h3>Odds and closing-line value</h3>
+        <span class="rank">answers &ldquo;beat the market&rdquo;</span>
+      </div>
+      <p>
+        <code>ingestion/odds_api.py</code> is complete, working, and imported by
+        nothing &mdash; and it&rsquo;s Postgres-only, so it can&rsquo;t run in
+        the Parquet setup you actually use. The free tier needs no card and is
+        enough to log closing lines going forward, though it can&rsquo;t
+        backtest 2021&ndash;26. If odds aren&rsquo;t wanted, delete the file
+        rather than leave dead code implying a working feature.
+      </p>
+    </div>
+
+    <div class="item">
+      <div class="item-head">
+        <h3>Check whether <code>DATABASE_URL</code> is set</h3>
+        <span class="rank">one command</span>
+      </div>
+      <p>
+        Without Postgres, <code>h2h_home_win_rate_l3</code> is NaN in both
+        training and serving &mdash; a permanently empty input. If it&rsquo;s
+        unset, either reimplement head-to-head on Parquet or drop the feature.
+      </p>
+    </div>
+
+    <div class="item">
+      <div class="item-head">
+        <h3>Automating the daily run</h3>
+        <span class="rank">PC or Pi</span>
+      </div>
+      <p>
+        <code>pipeline.daily</code> already does the whole loop, so either target
+        is a single cron line. What&rsquo;s missing for unattended operation: a
+        lockfile so overlapping runs can&rsquo;t both write the parquets, failure
+        notification through the Discord webhook, and retry on network blips
+        during the download. The Pi&rsquo;s real constraint is the pandas rebuild
+        over five seasons of shot data.
+      </p>
+    </div>
+
+    <div class="item">
+      <div class="item-head">
+        <h3>Smaller</h3>
+        <span class="rank">when convenient</span>
+      </div>
+      <p>
+        Two live snapshots still reach across season boundaries, which only
+        shows in the opening week. Props still projects scratched players. And
+        290 features on ~5,000 games is a lot &mdash; trimming to the top 20
+        improved Brier from 0.2416 to 0.2404, which suggests most of the rest is
+        noise.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    <p>
+      Full detail, including the reasoning behind each change, is in
+      <code>docs/HANDOFF.md</code> on the branch &mdash; it arrives with the
+      pull.
+    </p>
+    <p>
+      Expect no game predictions on opening night: with no games played,
+      coverage sits near 5% and the guard withholds rather than publishing
+      imputed averages.
+    </p>
+  </footer>
+
+</div>
