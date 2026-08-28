@@ -35,6 +35,9 @@ import httpx
 import pandas as pd
 from dotenv import load_dotenv
 
+from config.season import current_season as _current_season
+from pipeline.evaluate_history import confidence_label
+
 logger = logging.getLogger(__name__)
 
 # Discord embed colours
@@ -66,13 +69,13 @@ def _prob_bar(prob: float, width: int = 10) -> str:
 
 
 def _confidence_label(prob: float) -> str:
-    """Return pick strength label for the favoured side's probability."""
-    if prob >= 0.60:
-        return "Strong Pick"
-    elif prob >= 0.55:
-        return "Lean"
-    else:
-        return "Toss-Up"
+    """Return pick strength label for the favoured side's probability.
+
+    Delegates to pipeline.evaluate_history so the labels shown on a live pick
+    and the tiers reported by /history are the same thresholds — otherwise the
+    history breakdown would not actually be checking these labels.
+    """
+    return confidence_label(prob)
 
 
 # ---------------------------------------------------------------------------
@@ -247,69 +250,159 @@ def format_elo_embeds(top_n: int = 32) -> list[dict]:
 # Embed builders — prediction history / accuracy
 # ---------------------------------------------------------------------------
 
-def format_history_embed(last_n: int = 50) -> dict:
-    """Build an embed summarizing prediction accuracy from local history."""
-    path = _HISTORY_DIR / "prediction_history.parquet"
-    if not path.exists():
+def _pct(value: float) -> str:
+    return f"{value:.1%}"
+
+
+def _pts_delta(value: float, baseline: float) -> str:
+    """Signed gap in percentage points, e.g. "+2.4 pts" / "-1.4 pts"."""
+    return f"{(value - baseline) * 100:+.1f} pts"
+
+
+def _brier_delta(value: float, baseline: float) -> str:
+    """Gap against a Brier baseline, worded because lower is better."""
+    gap = baseline - value
+    return f"{abs(gap):.4f} {'better' if gap >= 0 else 'worse'}"
+
+
+def format_history_embed(
+    season: str | None = None,
+    last_n: int = 25,
+) -> dict:
+    """Build an embed summarizing prediction accuracy from local history.
+
+    Scoped to one season by default.  Pooling seasons into a single lifetime
+    number hides the thing you actually want to see — whether the model is
+    working *this* year — and mixes results from different trained models.
+    """
+    from pipeline.evaluate_history import (
+        calibration_table, confidence_breakdown, coverage_warning,
+        filter_season, load_history, recent_form, summarize,
+    )
+
+    hist = load_history()
+    if hist.empty:
         return {
-            "description": "No prediction history yet. Predictions are logged automatically when you run the pipeline.",
+            "title": "📈 Prediction History",
+            "description": (
+                "No prediction history yet. Predictions are logged "
+                "automatically when the pipeline runs."
+            ),
             "color": _COLOR_HIST,
         }
 
-    # Try to backfill outcomes before displaying
-    try:
-        from pipeline.evaluate_history import backfill_outcomes
-        hist = backfill_outcomes()
-    except Exception:
-        hist = pd.read_parquet(path)
+    if season is None:
+        season = _current_season()
+        if filter_season(hist, season).empty:
+            logged = sorted(hist["season"].dropna().unique())
+            if logged:
+                season = logged[-1]
 
-    if hist.empty:
-        hist = pd.read_parquet(path)
+    scoped = filter_season(hist, season)
+    if scoped.empty:
+        available = sorted(hist["season"].dropna().unique())
+        return {
+            "title": "📈 Prediction History",
+            "description": (
+                f"No predictions logged for **{season}**.\n"
+                f"Available: {', '.join(available) if available else 'none'}"
+            ),
+            "color": _COLOR_HIST,
+        }
 
-    total = len(hist)
-    unique_dates = hist["predicted_at"].str[:10].nunique() if "predicted_at" in hist.columns else "?"
-    models_used = ", ".join(hist["model_name"].unique()) if "model_name" in hist.columns else "unknown"
+    scope_label = "all seasons" if str(season).lower() == "all" else season
+    stats = summarize(scoped)
+
+    if not stats["n"]:
+        return {
+            "title": f"📈 Prediction History — {scope_label}",
+            "description": (
+                f"**{stats['n_logged']}** predictions logged, none scored yet.\n"
+                "Outcomes are filled in once the games are played."
+            ),
+            "color": _COLOR_HIST,
+        }
+
+    # ---- headline ----
+    acc_gap = _pts_delta(stats["accuracy"], stats["baseline_accuracy"])
+    brier_gap = _brier_delta(stats["brier"], stats["baseline_brier"])
+    beating = stats["accuracy"] >= stats["baseline_accuracy"]
 
     description = (
-        f"**Total predictions logged:** {total}\n"
-        f"**Prediction dates:** {unique_dates}\n"
-        f"**Models used:** {models_used}\n"
+        f"**Record:** {stats['wins']}-{stats['losses']} "
+        f"({stats['n']} of {stats['n_logged']} logged predictions scored)\n\n"
+        f"{'✅' if beating else '⚠️'} **Accuracy:** {_pct(stats['accuracy'])}  "
+        f"· always-home {_pct(stats['baseline_accuracy'])} ({acc_gap})\n"
+        f"**Brier:** {stats['brier']:.4f}  "
+        f"· no-skill {stats['baseline_brier']:.4f} ({brier_gap})\n"
     )
-
-    # Show accuracy if outcomes are available
-    has_outcome = hist.get("actual_home_win")
-    if has_outcome is not None and has_outcome.notna().any():
-        evaluated = hist[hist["actual_home_win"].notna()]
-        n_eval = len(evaluated)
-        accuracy = evaluated["correct"].mean() if "correct" in evaluated.columns else None
-        brier = evaluated["brier"].mean() if "brier" in evaluated.columns else None
-
-        description += f"\n**Evaluated:** {n_eval} / {total} games\n"
-        if accuracy is not None:
-            description += f"**Accuracy:** {accuracy:.1%}\n"
-        if brier is not None:
-            description += f"**Brier score:** {brier:.4f}\n"
-
-        # Recent trend
-        if n_eval >= 10 and "correct" in evaluated.columns:
-            recent = evaluated.tail(last_n)
-            r_acc = recent["correct"].mean()
-            r_brier = recent["brier"].mean() if "brier" in recent.columns else None
-            description += f"\n**Last {len(recent)}:** {r_acc:.1%} accuracy"
-            if r_brier is not None:
-                description += f", {r_brier:.4f} Brier"
-            description += "\n"
-    else:
+    if not beating:
         description += (
-            "\n*No outcomes yet. Run `python -m pipeline.evaluate_history` "
-            "after games complete to see accuracy.*"
+            "\n*Picking the home team every night would have done better "
+            "over this sample.*\n"
         )
 
+    fields = []
+
+    # ---- pick strength: does the bot's own label mean anything? ----
+    tiers = confidence_breakdown(scoped)
+    if not tiers.empty:
+        lines = [f"{'Tier':<12}{'N':>4}{'Acc':>8}{'Brier':>9}"]
+        for tier, row in tiers.iterrows():
+            lines.append(
+                f"{tier:<12}{int(row['n']):>4}"
+                f"{row['accuracy']:>7.1%}{row['brier']:>9.4f}"
+            )
+        fields.append({
+            "name": "By pick strength",
+            "value": "```\n" + "\n".join(lines) + "\n```",
+            "inline": False,
+        })
+
+    # ---- calibration ----
+    cal = calibration_table(scoped)
+    if not cal.empty:
+        lines = [f"{'Bucket':<9}{'N':>4}{'Said':>8}{'Actual':>9}"]
+        for bucket, row in cal.iterrows():
+            lines.append(
+                f"{str(bucket):<9}{int(row['n']):>4}"
+                f"{row['predicted']:>8.0%}{row['actual']:>9.0%}"
+            )
+        fields.append({
+            "name": "Calibration (said vs actual home win rate)",
+            "value": "```\n" + "\n".join(lines) + "\n```",
+            "inline": False,
+        })
+
+    # ---- recent form ----
+    recent = recent_form(scoped, last_n=last_n)
+    if recent["n"] >= 5:
+        fields.append({
+            "name": f"Last {recent['n']}",
+            "value": (
+                f"{recent['wins']}-{recent['losses']} · "
+                f"{_pct(recent['accuracy'])} accuracy · "
+                f"{recent['brier']:.4f} Brier"
+            ),
+            "inline": False,
+        })
+
+    footer_bits = []
+    if "model_name" in scoped.columns:
+        models = ", ".join(sorted(scoped["model_name"].dropna().unique()))
+        if models:
+            footer_bits.append(models)
+    warning = coverage_warning(scoped)
+    if warning:
+        footer_bits.append(warning)
+    footer_bits.append("small samples — read the trend, not the decimal")
+
     return {
-        "title": "📈 Prediction History",
+        "title": f"📈 Prediction History — {scope_label}",
         "description": description,
         "color": _COLOR_HIST,
-        "footer": {"text": "NHL Analyzer • Prediction Tracker"},
+        "fields": fields,
+        "footer": {"text": " • ".join(footer_bits)},
     }
 
 
@@ -445,11 +538,24 @@ def run_bot(token: str) -> None:
             logger.error("elo_cmd error: %s", e)
             await interaction.followup.send(f"Error loading ELO rankings: {e}")
 
-    @tree.command(name="history", description="Show prediction history summary")
-    async def history_cmd(interaction: discord.Interaction):
+    @tree.command(
+        name="history",
+        description="Show prediction accuracy vs baseline, calibration and pick strength",
+    )
+    @app_commands.describe(
+        season='Season to report, e.g. "2025-2026", or "all" (default: current)',
+        last="How many recent predictions to summarize (default: 25)",
+    )
+    async def history_cmd(
+        interaction: discord.Interaction,
+        season: str = "",
+        last: int = 25,
+    ):
         await interaction.response.defer()
         try:
-            embed = format_history_embed()
+            embed = format_history_embed(
+                season=season or None, last_n=max(1, last),
+            )
             await interaction.followup.send(embed=discord.Embed.from_dict(embed))
         except Exception as e:
             logger.error("history_cmd error: %s", e)

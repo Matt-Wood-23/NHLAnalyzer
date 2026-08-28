@@ -218,7 +218,27 @@ Shows projected shots on goal for skaters, with recent averages and ice time.
 ### Other Commands
 
 - **/elo** — Current ELO rankings for all 32 teams
-- **/history** — Prediction accuracy tracker (win rate, Brier score, calibration)
+- **/history** — Prediction accuracy tracker, scoped to one season
+
+`/history` answers the question a raw accuracy number cannot: **is the model
+actually adding anything?** Home teams win around 54% of NHL games, so it
+reports accuracy against an always-pick-the-home-team baseline and Brier
+against the no-skill score for the same games. It also breaks results down by
+the pick-strength labels the bot puts on live picks — so you can see whether a
+"Strong Pick" really does win more often than a "Lean" — and shows the
+calibration table that was previously only visible in terminal output.
+
+```
+/history                      # current season (or the latest with data)
+/history season:2025-2026     # a specific season
+/history season:all           # everything logged
+/history last:50              # widen the recent-form window
+```
+
+Predictions are tagged with their season, derived from the game ID, so
+seasons never pool into one lifetime figure — a good year cannot hide a bad
+one, and results from differently-trained models stay separate. The command
+is read-only; scoring is written by `pipeline.daily`.
 
 ---
 
