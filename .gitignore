@@ -3,6 +3,10 @@ data/raw/
 data/parquet/
 data/exports/
 data/cache/
+# Live prediction log — written daily on whichever machine runs the
+# pipeline. Tracking it meant a stale committed copy could overwrite a
+# real one on checkout. Back it up outside the repo.
+data/predictions/
 __pycache__/
 *.pyc
 *.pyo

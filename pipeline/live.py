@@ -37,6 +37,7 @@ from features.special_teams import ST_WINDOWS
 from features.context import _DIVISIONS, _CONFERENCES
 from ingestion.nhl_api import fetch_schedule
 from config.season import approximate_game_date, current_season, season_start
+from pipeline.evaluate_history import HISTORY_PATH
 
 logger = logging.getLogger(__name__)
 
@@ -580,13 +581,10 @@ def predict(
 # Save prediction history (Parquet — always works, no DB needed)
 # ---------------------------------------------------------------------------
 
-HISTORY_DIR = Path(__file__).parent.parent / "data" / "predictions"
-
-
 def save_prediction_history(predictions: pd.DataFrame, model_name: str) -> Path:
     """Append today's predictions to a Parquet-based history log."""
-    HISTORY_DIR.mkdir(parents=True, exist_ok=True)
-    path = HISTORY_DIR / "prediction_history.parquet"
+    path = HISTORY_PATH
+    path.parent.mkdir(parents=True, exist_ok=True)
 
     records = predictions[["game_id", "home_team", "away_team", "prob_home_win"]].copy()
     records["model_name"] = model_name

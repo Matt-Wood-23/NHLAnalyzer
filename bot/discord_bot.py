@@ -214,7 +214,6 @@ def format_props_embeds(props_df, pred_date: date) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 _PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
-_HISTORY_DIR = Path(__file__).parent.parent / "data" / "predictions"
 
 
 def format_elo_embeds(top_n: int = 32) -> list[dict]:

@@ -121,6 +121,18 @@ Teams that have not played yet still appear on the slate with NaN features
 rather than being dropped, so no game silently disappears from the first
 few days of the schedule.
 
+## Carry the prediction log forward
+
+`data/predictions/prediction_history.parquet` is gitignored and lives only on
+the machine that runs the pipeline. It is the one file that cannot be
+rebuilt — everything else regenerates from MoneyPuck — so copy it across if
+you change machines, and keep a backup somewhere outside the repo.
+
+Rolling into a new season does not need it cleared. Predictions are tagged
+with the season derived from their game ID, and `/history` scopes to one
+season by default, so last year's results stay available under
+`/history season:2025-2026` without diluting this year's numbers.
+
 ## Structural changes to watch for
 
 These are rare, but they are the things a new season can actually break.

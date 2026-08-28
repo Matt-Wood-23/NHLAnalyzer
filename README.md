@@ -240,6 +240,15 @@ seasons never pool into one lifetime figure — a good year cannot hide a bad
 one, and results from differently-trained models stay separate. The command
 is read-only; scoring is written by `pipeline.daily`.
 
+> **The prediction log is local and not in git.** `data/predictions/` is
+> gitignored, like `data/raw/` and `data/parquet/`. It is append-only data
+> written daily by whichever machine runs the pipeline, so tracking it meant a
+> stale committed copy could overwrite a real one on a checkout or hard reset.
+> It is the one genuinely irreplaceable file here — every other artifact can be
+> rebuilt from MoneyPuck — so **back it up outside the repo**, and copy it
+> across if you move machines. Nothing breaks if it is missing; the log simply
+> starts over from the next prediction.
+
 ---
 
 ## Quick Start
