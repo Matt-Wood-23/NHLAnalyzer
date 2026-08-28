@@ -26,6 +26,7 @@ from ingestion.player_stats import (
     game_log_to_dataframe,
     toi_to_seconds,
 )
+from config.season import current_season_api
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +124,7 @@ def _parse_toi_log(game_log: list[dict], player_id: int, player_name: str) -> pd
 
 def build_live_player_snapshot(
     players: list[dict],
-    season: str = "20252026",
+    season: str | None = None,
     max_window: int = 20,
 ) -> pd.DataFrame:
     """
@@ -132,12 +133,14 @@ def build_live_player_snapshot(
 
     Args:
         players: list of dicts with keys: id, name, team, position
-        season:  NHL API season string (e.g. "20252026")
+        season:  NHL API season string (e.g. "20252026"); defaults to current
         max_window: how many recent games to look back
 
     Returns:
         DataFrame indexed by player_id with rolling stat columns.
     """
+    season = season or current_season_api()
+
     rows = []
     for p in players:
         if p.get("position") == "G":

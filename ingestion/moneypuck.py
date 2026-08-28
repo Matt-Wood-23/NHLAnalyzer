@@ -16,8 +16,8 @@ from pathlib import Path
 
 import httpx
 import pandas as pd
-import psycopg2
-import psycopg2.extras
+
+from config.season import moneypuck_seasons, season_year
 
 logger = logging.getLogger(__name__)
 
@@ -27,14 +27,9 @@ PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
 # Shot ZIP URL pattern — season = start year (e.g. 2021 for 2021-2022)
 SHOT_ZIP_URL = "https://peter-tanner.com/moneypuck/downloads/shots_{year}.zip"
 
-# Seasons to ingest: display name -> URL year
-MP_SEASONS = {
-    "2021-2022": "2021",
-    "2022-2023": "2022",
-    "2023-2024": "2023",
-    "2024-2025": "2024",
-    "2025-2026": "2025",
-}
+# Seasons to ingest: display name -> URL year.
+# Derived from config.season so a new season needs no edit here.
+MP_SEASONS = moneypuck_seasons()
 
 HEADERS = {
     "User-Agent": (
@@ -54,9 +49,13 @@ def download_shots_zip(season: str) -> pd.DataFrame:
     Download and extract the shot-level CSV for a season.
     season: display name e.g. "2021-2022"
     Caches the extracted CSV to data/raw/.
+
+    Returns an empty DataFrame if MoneyPuck has not published the season yet
+    (404 / empty ZIP).  That happens every year between the schedule dropping
+    and the first games being played, and it should not abort the pipeline.
     """
     RAW_DIR.mkdir(parents=True, exist_ok=True)
-    year = MP_SEASONS.get(season, season.split("-")[0])
+    year = MP_SEASONS.get(season, str(season_year(season)))
     cache_path = RAW_DIR / f"moneypuck_shots_{year}.csv"
 
     if cache_path.exists():
@@ -67,16 +66,26 @@ def download_shots_zip(season: str) -> pd.DataFrame:
     logger.info("Downloading %s ...", url)
 
     resp = httpx.get(url, headers=HEADERS, timeout=300, follow_redirects=True)
+    if resp.status_code == 404:
+        logger.warning(
+            "MoneyPuck has no shot data for %s yet (404) — skipping season", season,
+        )
+        return pd.DataFrame()
     resp.raise_for_status()
 
     with zipfile.ZipFile(io.BytesIO(resp.content)) as zf:
         csv_names = [n for n in zf.namelist() if n.endswith(".csv")]
         if not csv_names:
-            raise ValueError(f"No CSV found in zip for season {season}")
+            logger.warning("No CSV in MoneyPuck zip for %s — skipping season", season)
+            return pd.DataFrame()
         csv_name = csv_names[0]
         logger.info("Extracting %s from zip", csv_name)
         with zf.open(csv_name) as f:
             df = pd.read_csv(f, low_memory=False)
+
+    if df.empty:
+        logger.warning("MoneyPuck returned 0 shots for %s — not caching", season)
+        return df
 
     df.to_csv(cache_path, index=False)
     logger.info("Cached %d shots → %s", len(df), cache_path.name)
@@ -192,8 +201,7 @@ def mp_game_id_to_nhl(mp_id: str, season: str) -> str:
     MoneyPuck: "20001"  (game_type digit + 4-digit game number)
     NHL API:   "2021020001"  (4-digit season year + 2-digit game type + 4-digit game number)
     """
-    season_year = season.split("-")[0]   # "2021-2022" -> "2021"
-    return f"{season_year}0{mp_id}"
+    return f"{season_year(season)}0{mp_id}"
 
 
 # ---------------------------------------------------------------------------
@@ -204,7 +212,11 @@ def upsert_game_stubs(conn, shots: pd.DataFrame, season: str) -> None:
     Insert minimal game stubs into the games table from MoneyPuck shot data.
     Runs before upsert_team_stats to satisfy the foreign key constraint.
     """
-    season_year = season.split("-")[0]
+    # Postgres is optional — the whole pipeline runs on Parquet alone.
+    # Imported here so a machine without psycopg2 can still ingest data.
+    import psycopg2.extras
+
+    start_year = season_year(season)
 
     game_info = (
         shots.groupby("game_id")
@@ -220,7 +232,7 @@ def upsert_game_stubs(conn, shots: pd.DataFrame, season: str) -> None:
         rows.append({
             "game_id":   nhl_id,
             "date":      None,          # NHL API will fill this in later
-            "season":    season_year + str(int(season_year) + 1),
+            "season":    f"{start_year}{start_year + 1}",
             "game_type": game_type,
             "home_team": row["homeTeamCode"],
             "away_team": row["awayTeamCode"],
@@ -238,6 +250,10 @@ def upsert_game_stubs(conn, shots: pd.DataFrame, season: str) -> None:
 
 
 def upsert_team_stats(conn, df: pd.DataFrame) -> None:
+    # Postgres is optional — the whole pipeline runs on Parquet alone.
+    # Imported here so a machine without psycopg2 can still ingest data.
+    import psycopg2.extras
+
     cols = [
         "game_id", "team", "is_home", "goals_for", "goals_against",
         "shots_for", "shots_against", "corsi_for", "corsi_against",
@@ -281,6 +297,9 @@ def ingest_all_seasons(conn=None, seasons: list[str] | None = None) -> None:
     for season in seasons:
         logger.info("=== Season %s ===", season)
         shots = download_shots_zip(season)
+        if shots.empty:
+            logger.info("No shot data for %s — skipping", season)
+            continue
         logger.info("Aggregating %d shots to per-game stats...", len(shots))
         per_game = aggregate_shots_to_games(shots, season)
         logger.info("Got %d team-game rows for %s", len(per_game), season)
@@ -299,6 +318,10 @@ def ingest_all_seasons(conn=None, seasons: list[str] | None = None) -> None:
             upsert_team_stats(conn, per_game)
             conn.commit()
 
+    if not all_frames:
+        logger.warning("No MoneyPuck data ingested for any season — nothing to save")
+        return
+
     combined = pd.concat(all_frames, ignore_index=True)
     save_parquet(combined, "moneypuck_team_game_stats")
 
@@ -309,6 +332,7 @@ def ingest_all_seasons(conn=None, seasons: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
+    import psycopg2
     import os
     from dotenv import load_dotenv
     load_dotenv()

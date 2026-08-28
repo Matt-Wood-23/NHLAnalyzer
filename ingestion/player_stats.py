@@ -28,6 +28,8 @@ from typing import Optional
 import pandas as pd
 import httpx
 
+from config.season import current_season_api, moneypuck_seasons
+
 logger = logging.getLogger(__name__)
 
 RAW_DIR    = Path(__file__).parent.parent / "data" / "raw"
@@ -36,13 +38,9 @@ CACHE_DIR   = Path(__file__).parent.parent / "data" / "cache" / "players"
 
 BASE_WEB = "https://api-web.nhle.com/v1"
 
-# MoneyPuck shots CSV year → season label
+# MoneyPuck shots CSV year → season label (derived from config.season)
 SHOT_SEASONS: dict[str, str] = {
-    "2021": "2021-2022",
-    "2022": "2022-2023",
-    "2023": "2023-2024",
-    "2024": "2024-2025",
-    "2025": "2025-2026",
+    year: label for label, year in moneypuck_seasons().items()
 }
 
 # Columns we need from the shots CSV
@@ -204,7 +202,7 @@ def _save_cache(player_id: int, season: str, games: list[dict]) -> None:
 
 def fetch_player_game_log(
     player_id: int,
-    season: str = "20252026",
+    season: str | None = None,
     game_type: int = 2,
     *,
     refresh: bool = False,
@@ -217,7 +215,7 @@ def fetch_player_game_log(
 
     Args:
         player_id: NHL player ID (e.g. 8478402 for McDavid)
-        season:    season in API format (e.g. "20252026")
+        season:    season in API format (e.g. "20252026"); defaults to current
         game_type: 2 = regular season, 3 = playoffs
         refresh:   if True, skip cache and always hit the API
 
@@ -226,6 +224,8 @@ def fetch_player_game_log(
         opponentAbbrev, homeRoadFlag, goals, assists, shots,
         points, toi (MM:SS string), powerPlayGoals, powerPlayPoints.
     """
+    season = season or current_season_api()
+
     if not refresh:
         cached = _load_cache(player_id, season)
         if cached is not None:
@@ -282,11 +282,12 @@ def game_log_to_dataframe(game_log: list[dict], player_id: int, player_name: str
 # NHL API — team roster
 # ---------------------------------------------------------------------------
 
-def fetch_team_roster(team_abbrev: str, season: str = "20252026") -> list[dict]:
+def fetch_team_roster(team_abbrev: str, season: str | None = None) -> list[dict]:
     """
     Fetch current roster for a team. Returns list of player dicts with
     keys: id, firstName, lastName, positionCode.
     """
+    season = season or current_season_api()
     url = f"{BASE_WEB}/roster/{team_abbrev}/{season}"
     try:
         resp = httpx.get(url, timeout=15)
@@ -309,13 +310,14 @@ def fetch_team_roster(team_abbrev: str, season: str = "20252026") -> list[dict]:
 
 def fetch_roster_with_logs(
     team_abbrev: str,
-    season: str = "20252026",
+    season: str | None = None,
     delay: float = 0.1,
 ) -> pd.DataFrame:
     """
     Fetch roster + current-season game log for each skater (not goalies).
     Returns combined DataFrame of per-player per-game stats.
     """
+    season = season or current_season_api()
     roster = fetch_team_roster(team_abbrev, season)
     skaters = [p for p in roster if p["position"] != "G"]
 

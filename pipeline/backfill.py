@@ -23,12 +23,12 @@ from pathlib import Path
 import pandas as pd
 from dotenv import load_dotenv
 
-from features.team import load_team_features, WINDOWS, ROLL_STATS, EWM_HALFLIFE, EWM_STATS
+from features.team import load_team_features, rolling_feature_columns
 from features.goalie import load_goalie_features
 from features.goalie_mp import load_goalie_features_from_mp
 from features.context import load_context_features
 from features.special_teams import load_special_teams_features
-from features.elo import compute_elo_ratings, save_current_elos
+from features.elo import compute_elo_ratings, load_elo_params, save_elo_snapshot
 from features.opponent_quality import compute_opponent_quality_features
 
 logger = logging.getLogger(__name__)
@@ -48,21 +48,8 @@ _META_COLS = {
     "hd_chances_for", "hd_chances_against", "hd_goals_for", "hd_goals_against",
     "won",  # current game win — the TARGET, not a feature
     "regulation_win",  # raw per-game — rolling version is the feature
+    "went_to_ot",  # post-game fact used only by the ELO updater
 }
-
-
-def _rolling_feature_cols(df: pd.DataFrame) -> list[str]:
-    """Return column names that are rolling features (suffix _lN, _ewmN, _venue_lN)."""
-    ewm_suffix = f"_ewm{EWM_HALFLIFE}"
-    venue_suffixes = ("_home_l10", "_away_l10")
-    return [
-        c for c in df.columns
-        if any(c.endswith(f"_l{w}") for w in WINDOWS)
-        or c.endswith(ewm_suffix)
-        or c.endswith(venue_suffixes[0])
-        or c.endswith(venue_suffixes[1])
-        or c == "games_played"
-    ]
 
 
 def build_feature_matrix(conn=None) -> pd.DataFrame:
@@ -90,7 +77,7 @@ def build_feature_matrix(conn=None) -> pd.DataFrame:
     # ------------------------------------------------------------------ #
     team_feats = load_team_features()
 
-    roll_cols = _rolling_feature_cols(team_feats)
+    roll_cols = rolling_feature_columns(team_feats)
 
     home_feats = team_feats[team_feats["is_home"]].copy()
     away_feats = team_feats[~team_feats["is_home"]].copy()
@@ -194,11 +181,18 @@ def build_feature_matrix(conn=None) -> pd.DataFrame:
     # ------------------------------------------------------------------ #
     # 6. ELO ratings                                                       #
     # ------------------------------------------------------------------ #
-    home_results = team_feats[team_feats["is_home"]][
-        ["game_id", "season", "home_team", "away_team", "won"]
-    ].rename(columns={"won": "home_win"})
+    elo_cols = ["game_id", "season", "home_team", "away_team", "won"]
+    if "went_to_ot" in team_feats.columns:
+        elo_cols.append("went_to_ot")  # lets the updater discount OT/SO results
+    home_results = team_feats[team_feats["is_home"]][elo_cols].rename(
+        columns={"won": "home_win"}
+    )
 
-    elo_df = compute_elo_ratings(home_results)
+    # Use tuned parameters when `python -m features.elo` has produced any.
+    elo_params = load_elo_params()
+    elo_df, final_elos = compute_elo_ratings(
+        home_results, return_final=True, **elo_params,
+    )
     matrix = matrix.merge(
         elo_df[["game_id", "home_elo", "away_elo", "diff_elo"]],
         on="game_id", how="left",
@@ -206,12 +200,13 @@ def build_feature_matrix(conn=None) -> pd.DataFrame:
     logger.info("ELO features merged")
 
     # Save current ELO state for live pipeline
-    save_current_elos(home_results)
+    save_elo_snapshot(final_elos)
 
     # ------------------------------------------------------------------ #
     # 7. Opponent quality-adjusted features                                #
     # ------------------------------------------------------------------ #
-    oq_feats = compute_opponent_quality_features(team_feats)
+    # Reuse the ELO pass above rather than replaying the whole schedule.
+    oq_feats = compute_opponent_quality_features(team_feats, elo_df=elo_df)
     if not oq_feats.empty:
         oq_roll = [c for c in oq_feats.columns if c not in ("game_id", "team")]
         home_oq = (

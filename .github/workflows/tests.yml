@@ -1,0 +1,36 @@
+name: tests
+
+on:
+  push:
+    branches: ["main", "claude/**"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # The suite runs entirely on synthetic data, so it needs the modelling
+      # stack but neither the network nor Postgres.
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy scikit-learn pyarrow joblib python-dotenv httpx pytest
+          # Gradient-boosting libraries, so the model-configuration tests are
+          # exercised rather than skipped.
+          pip install xgboost lightgbm
+
+      - name: Run tests
+        run: pytest -q

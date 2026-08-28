@@ -12,8 +12,8 @@ from datetime import date, timedelta
 from typing import Optional
 
 import httpx
-import psycopg2
-import psycopg2.extras
+
+from config.season import all_seasons, label_to_api
 
 logger = logging.getLogger(__name__)
 
@@ -266,6 +266,10 @@ def upsert_game(conn, game: dict) -> None:
 
 
 def upsert_goalie_stats(conn, rows: list[dict]) -> None:
+    # Postgres is optional — the whole pipeline runs on Parquet alone.
+    # Imported here so a machine without psycopg2 can still ingest data.
+    import psycopg2.extras
+
     if not rows:
         return
     sql = """
@@ -286,6 +290,10 @@ def upsert_goalie_stats(conn, rows: list[dict]) -> None:
 
 
 def upsert_team_stats(conn, rows: list[dict]) -> None:
+    # Postgres is optional — the whole pipeline runs on Parquet alone.
+    # Imported here so a machine without psycopg2 can still ingest data.
+    import psycopg2.extras
+
     if not rows:
         return
     sql = """
@@ -350,6 +358,7 @@ def backfill_season(conn, season: str) -> None:
 
 
 if __name__ == "__main__":
+    import psycopg2
     import os
     from dotenv import load_dotenv
     load_dotenv()
@@ -358,8 +367,8 @@ if __name__ == "__main__":
     db_url = os.environ.get("DATABASE_URL", "postgresql://localhost/nhl_ml")
     conn = psycopg2.connect(db_url)
 
-    # Backfill all available seasons
-    for season in ["20212022", "20222023", "20232024", "20242025", "20252026"]:
-        backfill_season(conn, season)
+    # Backfill all available seasons (list extends automatically each year)
+    for season in all_seasons():
+        backfill_season(conn, label_to_api(season))
 
     conn.close()

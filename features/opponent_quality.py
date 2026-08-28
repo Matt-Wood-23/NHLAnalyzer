@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from features.elo import compute_elo_ratings
+from features.elo import compute_elo_ratings, load_elo_params
 
 logger = logging.getLogger(__name__)
 
@@ -28,6 +28,7 @@ OQ_STATS = ["xgf_pct", "cf_pct", "won", "goal_diff"]
 
 def compute_opponent_quality_features(
     team_features: pd.DataFrame,
+    elo_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """
     Compute rolling stats split by opponent quality (above/below median ELO).
@@ -36,17 +37,22 @@ def compute_opponent_quality_features(
         team_features: output of features.team.load_team_features().
             Must contain game_id, season, team, home_team, away_team, is_home,
             won, and the raw stats in OQ_STATS.
+        elo_df: per-game pre-game ELO ratings from
+            :func:`features.elo.compute_elo_ratings`.  Pass the backfill's
+            existing frame to avoid replaying the schedule a second time, and
+            to make sure both use the same tuned parameters.
 
     Returns:
         DataFrame with (game_id, team) and rolling columns:
           <stat>_vs_strong_l20, <stat>_vs_weak_l20
     """
-    # 1. Compute per-game ELO for every team
+    # 1. Per-game ELO for every team
     home_results = team_features[team_features["is_home"]][
         ["game_id", "season", "home_team", "away_team", "won"]
     ].rename(columns={"won": "home_win"})
 
-    elo_df = compute_elo_ratings(home_results)
+    if elo_df is None:
+        elo_df = compute_elo_ratings(home_results, **load_elo_params())
 
     # Build a per-game team ELO lookup
     home_elos = elo_df[["game_id", "home_elo"]].copy()

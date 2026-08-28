@@ -35,12 +35,14 @@ from sklearn.linear_model import PoissonRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
+from config.season import all_seasons
+
 logger = logging.getLogger(__name__)
 
 PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
 SAVED_DIR   = Path(__file__).parent.parent / "models" / "saved"
 
-SEASONS = ["2021-2022", "2022-2023", "2023-2024", "2024-2025", "2025-2026"]
+SEASONS = all_seasons()
 
 # Features used by the SOG model
 SOG_FEATURE_COLS = [

@@ -40,11 +40,12 @@ from ingestion.player_stats import (
     fetch_team_roster, fetch_player_game_log, toi_to_seconds,
 )
 from models.sog_model import load_sog_model, SOG_FEATURE_COLS
+from config.season import current_season_api
 
 logger = logging.getLogger(__name__)
 
 PARQUET_DIR  = Path(__file__).parent.parent / "data" / "parquet"
-CURRENT_SEASON_API = "20252026"
+CURRENT_SEASON_API = current_season_api()
 PLAYER_WINDOWS = [10, 20]
 
 
