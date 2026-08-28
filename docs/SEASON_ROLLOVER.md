@@ -67,6 +67,10 @@ python -m models.xgboost_model --trials 150 --ensemble --calibration none --feat
 # 7. Retrain and serialize the production model
 python -m pipeline.train --model random_forest
 
+# 7b. Retrain the SOG props model on the extra season
+#     (pipeline.backfill rebuilds player_game_stats.parquet for it)
+python -m models.sog_model
+
 # 8. Dry-run a prediction
 python -m pipeline.live --dry-run
 ```
@@ -83,6 +87,7 @@ seen the most recent season.
 | `python -m pipeline.live --dry-run` | Games appear, no "Missing snapshot" warnings |
 | `home_elo` / `away_elo` | Near 1500 and clustered — ratings regressed at the season boundary |
 | Rolling features | Mostly NaN on day one, and that is correct |
+| `python -m pipeline.props_live --dry-run` | Silent until skaters reach 5 games |
 
 ### Expect no predictions for the first few days
 

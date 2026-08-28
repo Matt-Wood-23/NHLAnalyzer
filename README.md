@@ -213,6 +213,17 @@ Shows each game with win probabilities, pick strength, ELO ratings, and context 
 
 Shows projected shots on goal for skaters, with recent averages and ice time.
 
+Player features are served from `player_game_stats.parquet` — the same file the
+SOG model trains on, aggregated from the MoneyPuck shot data. That matters:
+the NHL API game log has no expected-goals data, so building live features from
+it left `xg`, `shot_attempts` and `xg_per_attempt` empty across both windows —
+six of the model's eleven inputs replaced by training-set means on every
+projection. The NHL API is still used for rosters and ice time, neither of
+which the model consumes. Opponent context comes from the same team snapshot
+the training matrix uses, so the two agree on what `opp_sf_pct_l20` means.
+
+Projections are subject to the same coverage guard as game predictions.
+
 ![SOG props command](sogprediction.png)
 
 ### Other Commands
@@ -322,7 +333,8 @@ NHLAnalyzer/
     baseline.py             # RF + Logistic Regression baselines
     xgboost_model.py        # XGBoost + LightGBM + ensemble
     stacking.py             # Stacking meta-learner
-    sog_model.py            # Shots on goal (player props)
+    sog_model.py            # Shots on goal (player props) — trains and
+                            #   predicts from player_game_stats.parquet
     evaluate.py             # Evaluation metrics framework
     saved/                  # Serialized trained models
   pipeline/

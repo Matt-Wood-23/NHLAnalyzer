@@ -57,10 +57,17 @@ def refresh_data(conn=None):
 
     # Step 3: Rebuild the full feature matrix
     logger.info("Rebuilding feature matrix...")
-    from pipeline.backfill import build_feature_matrix, save_feature_matrix
+    from pipeline.backfill import (
+        build_feature_matrix, build_player_game_stats, save_feature_matrix,
+    )
     matrix = build_feature_matrix(conn=conn)
     save_feature_matrix(matrix)
     logger.info("Feature matrix rebuilt: %d games x %d cols", *matrix.shape)
+
+    # Step 4: Player-level stats — the SOG props model both trains and
+    # predicts from these, so they must refresh with everything else.
+    logger.info("Rebuilding player game stats...")
+    build_player_game_stats()
 
 
 def score_predictions():

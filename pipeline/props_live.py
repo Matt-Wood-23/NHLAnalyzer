@@ -23,7 +23,6 @@ Usage:
 
 import argparse
 import logging
-import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -35,11 +34,12 @@ import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 
-from ingestion.nhl_api import fetch_schedule, TEAM_ABBREVS
+from ingestion.nhl_api import fetch_schedule
 from ingestion.player_stats import (
     fetch_team_roster, fetch_player_game_log, toi_to_seconds,
 )
-from models.sog_model import load_sog_model, SOG_FEATURE_COLS
+from features.player import MIN_GAMES, pregame_player_snapshot
+from models.sog_model import load_sog_model
 from config.season import current_season_api
 
 logger = logging.getLogger(__name__)
@@ -47,6 +47,11 @@ logger = logging.getLogger(__name__)
 PARQUET_DIR  = Path(__file__).parent.parent / "data" / "parquet"
 CURRENT_SEASON_API = current_season_api()
 PLAYER_WINDOWS = [10, 20]
+
+# Same rationale as pipeline.live.MIN_FEATURE_COVERAGE: the SOG pipeline
+# mean-imputes missing values, so a projection built mostly from imputed
+# features is the training-set average wearing a player's name.
+MIN_FEATURE_COVERAGE = 0.70
 
 
 # ---------------------------------------------------------------------------
@@ -58,125 +63,75 @@ def _rolling_mean(series: pd.Series, w: int) -> float:
     return float(vals.mean()) if len(vals) > 0 else np.nan
 
 
-def build_player_features_from_log(
+def fetch_player_toi(
     player_id: int,
-    player_name: str,
-    team: str,
-    position: str,
     *,
     refresh: bool = False,
-) -> Optional[dict]:
-    """
-    Fetch current-season game log for one player and compute rolling features.
-    Returns a feature dict or None if insufficient data.
+) -> dict:
+    """Fetch a player's recent ice time from the NHL API game log.
+
+    Ice time is display-only — it is not one of the SOG model's features —
+    so a failure here costs a column in the embed, never a projection.
+    Everything the model consumes comes from player_game_stats.parquet, the
+    same source it was trained on.
     """
     log = fetch_player_game_log(player_id, CURRENT_SEASON_API, refresh=refresh)
     if not log:
-        return None
+        return {}
 
-    rows = []
-    for g in log:
-        rows.append({
-            "sog":           int(g.get("shots", 0)),
-            "toi_seconds":   toi_to_seconds(g.get("toi", "0:00")),
-            "goals":         int(g.get("goals", 0)),
-            "assists":       int(g.get("assists", 0)),
-            "pp_points":     int(g.get("powerPlayPoints", 0)),
-        })
-    df = pd.DataFrame(rows)
-
-    if len(df) < 5:
-        logger.debug("Skipping %s — only %d games", player_name, len(df))
-        return None
-
-    feats: dict = {
-        "player_id":    player_id,
-        "player_name":  player_name,
-        "team":         team,
-        "position":     position,
-        "games_played": len(df),
-    }
-
-    for col in ["sog", "toi_seconds"]:
-        for w in PLAYER_WINDOWS:
-            feats[f"{col}_l{w}"] = _rolling_mean(df[col], w)
-
-    # Proxies for xG features (not in NHL API — set NaN; model imputes with mean)
-    for col in ["xg", "shot_attempts", "xg_per_attempt"]:
-        for w in PLAYER_WINDOWS:
-            feats[f"{col}_l{w}"] = np.nan
-
-    # PP usage proxy: PP points rate (signal for PP ice time)
-    feats["pp_points_l10"] = _rolling_mean(df["pp_points"], 10)
-
-    return feats
+    toi = pd.Series([toi_to_seconds(g.get("toi", "0:00")) for g in log], dtype=float)
+    pp_points = pd.Series(
+        [float(g.get("powerPlayPoints", 0) or 0) for g in log], dtype=float
+    )
+    return {
+        f"toi_seconds_l{w}": _rolling_mean(toi, w) for w in PLAYER_WINDOWS
+    } | {"pp_points_l10": _rolling_mean(pp_points, 10)}
 
 
 # ---------------------------------------------------------------------------
 # Concurrent worker
 # ---------------------------------------------------------------------------
 
-def _fetch_player_worker(
-    p: dict,
-    team: str,
-    opp: str,
-    def_snap: pd.DataFrame,
-    results: list,
+def _fetch_toi_worker(
+    player_id: int,
+    player_name: str,
+    results: dict,
     lock: threading.Lock,
     refresh: bool = False,
 ) -> None:
-    """
-    ThreadPoolExecutor worker: fetch one player's features and append to results.
-    Thread-safe via lock on the shared results list.
-    """
-    feats = build_player_features_from_log(
-        player_id=p["id"],
-        player_name=p["name"],
-        team=team,
-        position=p.get("position", ""),
-        refresh=refresh,
-    )
-    if feats is None:
-        return
-
-    feats["opponent"] = opp
-    if opp and opp in def_snap.index:
-        opp_row = def_snap.loc[opp]
-        feats["opp_sf_pct_l20"]             = opp_row.get("opp_sf_pct_l20", np.nan)
-        feats["opp_xg_against_l20"]         = opp_row.get("opp_xg_against_l20", np.nan)
-        feats["opp_hd_chances_against_l20"] = opp_row.get("opp_hd_chances_against_l20", np.nan)
-    else:
-        feats["opp_sf_pct_l20"]             = np.nan
-        feats["opp_xg_against_l20"]         = np.nan
-        feats["opp_hd_chances_against_l20"] = np.nan
-
-    with lock:
-        results.append(feats)
+    """ThreadPoolExecutor worker: fetch one player's ice time."""
+    toi = fetch_player_toi(player_id, refresh=refresh)
+    if toi:
+        with lock:
+            results[player_id] = toi
 
 
 # ---------------------------------------------------------------------------
 # Opponent defensive context
 # ---------------------------------------------------------------------------
 
-def _load_team_defensive_snapshot() -> pd.DataFrame:
-    """Load the team feature parquet and extract current defensive stats per team."""
-    parquet_path = PARQUET_DIR / "moneypuck_team_game_stats.parquet"
-    from features.team import _add_derived_columns
-    df = pd.read_parquet(parquet_path)
-    df = _add_derived_columns(df)
-    df["game_num"] = df["game_id"].str[-4:].astype(int)
-    df = df.sort_values(["team", "season", "game_num"])
+def _load_opponent_snapshot() -> pd.DataFrame:
+    """Opponent defensive stats, computed exactly as the training matrix does.
 
-    snap_rows = []
-    for team, grp in df.groupby("team"):
-        recent = grp.tail(20)
-        snap_rows.append({
-            "team":                    team,
-            "opp_sf_pct_l20":          recent["sf_pct"].mean() if "sf_pct" in recent else np.nan,
-            "opp_xg_against_l20":      recent["xg_against"].mean() if "xg_against" in recent else np.nan,
-            "opp_hd_chances_against_l20": recent["hd_chances_against"].mean() if "hd_chances_against" in recent else np.nan,
-        })
-    return pd.DataFrame(snap_rows).set_index("team")
+    Training reads the opponent's pre-game ``sf_pct_l20`` / ``xg_against_l20``
+    / ``hd_chances_against_l20`` out of the team feature matrix.  This used to
+    re-derive them here as a flat mean of each team's last 20 games across
+    every season, which is neither season-bounded nor the same statistic.
+    Reusing the live team snapshot keeps the two definitions identical.
+    """
+    from pipeline.live import _build_team_snapshot
+
+    snapshot = _build_team_snapshot()
+    keep = {
+        "sf_pct_l20": "opp_sf_pct_l20",
+        "xg_against_l20": "opp_xg_against_l20",
+        "hd_chances_against_l20": "opp_hd_chances_against_l20",
+    }
+    available = {src: dst for src, dst in keep.items() if src in snapshot.columns}
+    if not available:
+        logger.warning("Team snapshot has no defensive columns — opponent context will be NaN")
+        return pd.DataFrame()
+    return snapshot[list(available)].rename(columns=available)
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +145,7 @@ def run(
     use_cache: bool = True,
     max_workers: int = 10,
     top: int = 10,
+    min_coverage: float = MIN_FEATURE_COVERAGE,
 ) -> pd.DataFrame:
     """
     Generate expected SOG projections for all skaters in today's games.
@@ -200,8 +156,10 @@ def run(
         api_delay:   deprecated — kept for backward compat; pool size is the
                      rate limiter now
         use_cache:   if False, bypass disk cache and re-fetch all game logs
-        max_workers: concurrent HTTP threads for player game-log fetching
+        max_workers: concurrent HTTP threads for ice-time fetching
         top:         return only the top N players by expected SOG (0 = no limit)
+        min_coverage: drop players with fewer than this fraction of the SOG
+                     model's features populated
 
     Returns:
         DataFrame sorted by expected_sog desc, with columns:
@@ -236,59 +194,122 @@ def run(
         logger.error("%s", e)
         return pd.DataFrame()
 
-    # 3. Load opponent defensive snapshot
-    def_snap = _load_team_defensive_snapshot()
+    # 3. Opponent defensive context, from the same snapshot training used
+    opp_snap = _load_opponent_snapshot()
 
-    # 4. Fetch rosters sequentially (cheap — one call per team)
+    # 4. Rosters (who is on each team today) — one cheap call per team
     teams_today = list(team_to_opp.keys())
-    all_skaters: list[tuple[dict, str, str]] = []
+    roster_by_player: dict[int, dict] = {}
 
     for team in teams_today:
         logger.info("Fetching roster: %s", team)
-        roster = fetch_team_roster(team, CURRENT_SEASON_API)
-        opp = team_to_opp.get(team, "")
-        skaters = [p for p in roster if p.get("position") != "G"]
-        for p in skaters:
-            all_skaters.append((p, team, opp))
-        time.sleep(0.05)    # brief inter-team pause
+        for player in fetch_team_roster(team, CURRENT_SEASON_API):
+            if player.get("position") == "G":
+                continue
+            roster_by_player[int(player["id"])] = {
+                # The roster is authoritative on who plays for whom today;
+                # a traded player's history still carries his old team.
+                "player_name": player["name"],
+                "team": team,
+                "opponent": team_to_opp.get(team, ""),
+                "position": player.get("position", ""),
+            }
+        time.sleep(0.05)
 
+    if not roster_by_player:
+        logger.warning("No rosters fetched — check API connectivity")
+        return pd.DataFrame()
+
+    # 5. Model features from player_game_stats.parquet — the source the SOG
+    #    model was trained on.  The NHL API game log does not expose xGoal, so
+    #    building features from it left xg / shot_attempts / xg_per_attempt
+    #    permanently NaN: six of the model's eleven inputs silently replaced
+    #    by training-set means on every projection.
+    stats_path = PARQUET_DIR / "player_game_stats.parquet"
+    if not stats_path.exists():
+        logger.error(
+            "No %s — run `python -m pipeline.backfill` to build it. "
+            "Without it the SOG model has no player features.", stats_path.name,
+        )
+        return pd.DataFrame()
+
+    history = pd.read_parquet(stats_path)
+    snapshot = pregame_player_snapshot(history, player_ids=list(roster_by_player))
+    snapshot = snapshot[snapshot["games_played"] >= MIN_GAMES]
+    if snapshot.empty:
+        logger.warning("No skater has %d+ games yet — no projections", MIN_GAMES)
+        return pd.DataFrame()
+
+    # Roster identity overrides the history's (possibly stale) team.
+    identity = pd.DataFrame.from_dict(roster_by_player, orient="index")
+    player_df = snapshot.drop(
+        columns=["player_name", "team", "position"], errors="ignore",
+    ).join(identity, how="inner")
+
+    # Attach the opponent's defensive stats.
+    if not opp_snap.empty:
+        player_df = player_df.join(opp_snap, on="opponent")
+
+    # 6. Ice time for display only — not a model feature, so failures here
+    #    cost a column, never a projection.
     logger.info(
-        "Fetching game logs for %d skaters (max_workers=%d, cache=%s)",
-        len(all_skaters), max_workers, use_cache,
+        "Fetching ice time for %d skaters (max_workers=%d, cache=%s)",
+        len(player_df), max_workers, use_cache,
     )
-
-    # 5. Concurrent player game-log fetches
-    all_player_feats: list[dict] = []
+    toi_by_player: dict[int, dict] = {}
     lock = threading.Lock()
-    refresh = not use_cache
-
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = {
             executor.submit(
-                _fetch_player_worker, p, team, opp, def_snap,
-                all_player_feats, lock, refresh,
-            ): p["name"]
-            for (p, team, opp) in all_skaters
+                _fetch_toi_worker, int(pid), row["player_name"],
+                toi_by_player, lock, not use_cache,
+            ): row["player_name"]
+            for pid, row in player_df.iterrows()
         }
         for future in as_completed(futures):
             if (exc := future.exception()):
-                logger.warning("Worker error for %s: %s", futures[future], exc)
+                logger.warning("Ice-time fetch failed for %s: %s", futures[future], exc)
 
-    if not all_player_feats:
-        logger.warning("No player features built — check API connectivity")
+    if toi_by_player:
+        player_df = player_df.join(pd.DataFrame.from_dict(toi_by_player, orient="index"))
+
+    # 7. Predict, refusing to publish projections built on absent features
+    player_df = player_df.reset_index(names="player_id")
+    missing = [c for c in feature_cols if c not in player_df.columns]
+    if missing:
+        logger.warning(
+            "%d/%d SOG feature(s) absent: %s", len(missing), len(feature_cols), missing,
+        )
+        for col in missing:
+            player_df[col] = np.nan
+
+    X = player_df[feature_cols].apply(pd.to_numeric, errors="coerce")
+    player_df["feature_coverage"] = X.notna().mean(axis=1)
+
+    usable = player_df["feature_coverage"] >= min_coverage
+    if not usable.all():
+        worst = player_df.loc[~usable, "feature_coverage"]
+        logger.error(
+            "Dropping %d projection(s) below %.0f%% feature coverage (min %.0f%%)",
+            int((~usable).sum()), min_coverage * 100, worst.min() * 100,
+        )
+        player_df, X = player_df[usable].copy(), X[usable]
+
+    if player_df.empty:
+        logger.error(
+            "No skater had enough usable features — check that "
+            "player_game_stats.parquet is current (python -m pipeline.backfill)",
+        )
         return pd.DataFrame()
 
-    player_df = pd.DataFrame(all_player_feats)
+    logger.info(
+        "Feature coverage: min %.0f%%, mean %.0f%%",
+        player_df["feature_coverage"].min() * 100,
+        player_df["feature_coverage"].mean() * 100,
+    )
+    player_df["expected_sog"] = pipeline.predict(X.values)
 
-    # 6. Predict expected SOG
-    missing = [c for c in feature_cols if c not in player_df.columns]
-    for col in missing:
-        player_df[col] = np.nan
-
-    X = player_df[feature_cols].values
-    player_df["expected_sog"] = pipeline.predict(X)
-
-    # 7. Format output
+    # 8. Format output
     player_df["toi_min_l10"] = (player_df.get("toi_seconds_l10", np.nan) / 60).round(1)
     player_df["expected_sog"] = player_df["expected_sog"].round(2)
 
@@ -327,6 +348,9 @@ if __name__ == "__main__":
                         help="Show top N players (default: 10, 0 = no limit)")
     parser.add_argument("--no-cache", action="store_true",
                         help="Bypass disk cache and re-fetch all player game logs from API")
+    parser.add_argument("--min-coverage", type=float, default=MIN_FEATURE_COVERAGE,
+                        help="Drop players with fewer than this fraction of "
+                             "SOG model features populated (0-1)")
     parser.add_argument("--max-workers", type=int, default=10,
                         help="Concurrent HTTP threads for player fetching (default: 10)")
     args = parser.parse_args()
@@ -338,6 +362,7 @@ if __name__ == "__main__":
         use_cache=not args.no_cache,
         max_workers=args.max_workers,
         top=args.top,
+        min_coverage=args.min_coverage,
     )
 
     if preds.empty:

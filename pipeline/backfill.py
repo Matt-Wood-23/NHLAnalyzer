@@ -252,6 +252,38 @@ def build_feature_matrix(conn=None) -> pd.DataFrame:
     return matrix
 
 
+def build_player_game_stats() -> Path | None:
+    """Aggregate the MoneyPuck shot CSVs to per-player per-game stats.
+
+    The SOG model trains on this file and, since the props pipeline was fixed
+    to serve from it too, predicts from it as well.  It used to be produced
+    only by running ``python -m ingestion.player_stats`` by hand, so it drifted
+    out of date with the team-level data the daily pipeline refreshed beside
+    it.  It comes from shot CSVs that are already downloaded, so rebuilding it
+    here costs nothing extra.
+    """
+    from ingestion.player_stats import (
+        aggregate_shots_to_player_games, save_player_game_stats,
+    )
+
+    try:
+        player_games = aggregate_shots_to_player_games()
+    except FileNotFoundError as e:
+        logger.warning("Skipping player game stats: %s", e)
+        return None
+
+    if player_games.empty:
+        logger.warning("No player game stats aggregated — skipping")
+        return None
+
+    path = save_player_game_stats(player_games)
+    logger.info(
+        "Player game stats: %d rows, %d players → %s",
+        len(player_games), player_games["player_id"].nunique(), path,
+    )
+    return path
+
+
 def save_feature_matrix(matrix: pd.DataFrame, name: str = "feature_matrix") -> Path:
     PARQUET_DIR.mkdir(parents=True, exist_ok=True)
     path = PARQUET_DIR / f"{name}.parquet"
@@ -279,6 +311,9 @@ if __name__ == "__main__":
 
     matrix = build_feature_matrix(conn=conn)
     path = save_feature_matrix(matrix)
+
+    # Player-level stats for the SOG props model
+    build_player_game_stats()
 
     print(f"\nFeature matrix saved: {path}")
     print(f"Shape: {matrix.shape}")
