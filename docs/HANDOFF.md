@@ -243,20 +243,27 @@ and backups start roughly a third of games. Goaltending is among the biggest
 single-game swing factors. Needs a reliable pre-game source — the NHL API
 doesn't publish confirmed starters cleanly.
 
-### Persist the odds so CLV can accumulate
+### Watch the market comparison as data accumulates
 
-`ingestion/action_network.py` already pulls moneylines from Action Network's
-internal API with no key and no payment, and the bot uses it — there is an
-`/odds` command and `format_game_embed` shows a per-game edge against the
-no-vig market price. This supersedes `ingestion/odds_api.py`, which is a
-paid-tier client that **nothing imports** and which is Postgres-only; delete it
-or mark it unused rather than leaving dead code implying a second odds path.
+**Built.** Every prediction now records the market's no-vig consensus price,
+`pipeline.daily` fills in the closing price once games are played, and
+`/history` reports model-vs-market Brier, closing-line value, and whether a
+claimed edge actually materialised.
 
-The gap is that odds are **display-only and never stored**. Nothing records the
-market price at prediction time, so closing-line value cannot be computed after
-the fact. Writing the no-vig market probability into the prediction log
-alongside `prob_home_win` would start CLV accumulating from opening night, and
-given the Strong Pick result above that is the highest-value item here.
+Backfilling closing prices onto the existing log recovered 91 of 179 games.
+That retroactive sample is **not** evidence of an edge: the model appears
+0.0053 Brier ahead of the market, but the 95% bootstrap CI is
+[-0.0195, +0.0088] and spans zero. The mechanism is plain — the model averages
+P(home)=0.500 against the market's 0.538, and home teams won only 45.1% over
+those 91 games, so the less home-leaning forecaster wins on luck. A flat 50%
+forecast would have scored 0.2500 against the market's 0.2533.
+
+The prospective capture is the trustworthy one. Revisit after a few hundred
+games with a price attached.
+
+`ingestion/odds_api.py` is a paid-tier client that nothing imports and which
+is Postgres-only. Delete it or mark it unused rather than leaving dead code
+implying a second odds path.
 
 ### Refresh the stale Postgres `games` table
 

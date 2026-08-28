@@ -72,10 +72,17 @@ def refresh_data(conn=None):
 
 def score_predictions():
     """Backfill outcomes and print accuracy report."""
-    from pipeline.evaluate_history import backfill_outcomes, print_accuracy_report
+    from pipeline.evaluate_history import (
+        backfill_closing_odds, backfill_outcomes, print_accuracy_report, HISTORY_PATH,
+    )
 
     hist = backfill_outcomes()
     if not hist.empty:
+        # Capture the closing price for games that have now been played.  This
+        # is the half of the record that expires: lines move, and historical
+        # odds are not freely available after the fact.
+        hist = backfill_closing_odds(hist)
+        hist.to_parquet(HISTORY_PATH, index=False)
         print_accuracy_report(hist)
     else:
         print("No prediction history to evaluate yet.")

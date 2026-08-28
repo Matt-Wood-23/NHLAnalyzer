@@ -231,7 +231,23 @@ Projections are subject to the same coverage guard as game predictions.
 - **/elo** — Current ELO rankings for all 32 teams
 - **/history** — Prediction accuracy tracker, scoped to one season
 
-`/history` answers the question a raw accuracy number cannot: **is the model
+`/history` compares the model against **the closing line** — the only
+benchmark that decides whether any of this is worth acting on. Beating
+always-pick-home says the model isn't useless; beating the market is the
+actual bar. Every prediction records the market's no-vig consensus price at
+the moment it was made, and the closing price is filled in once the game is
+played, so two things become answerable: whether the model's probabilities
+are better than the market's, and whether the line subsequently moved toward
+the side it picked (closing-line value — the standard leading indicator,
+since prices are far less noisy than results).
+
+Odds come from Action Network via `ingestion/action_network.py`, which needs
+no key and no subscription. Capture is best-effort: a missing line costs a
+column, never a prediction. But it is **perishable** — lines move and
+historical odds are not freely available, so a price not recorded at
+prediction time cannot be recovered later.
+
+Beyond the market, `/history` also answers the question a raw accuracy number cannot: **is the model
 actually adding anything?** Home teams win around 54% of NHL games, so it
 reports accuracy against an always-pick-the-home-team baseline and Brier
 against the no-skill score for the same games. It also breaks results down by

@@ -265,3 +265,34 @@ if __name__ == "__main__":
                     + (f"  Spread {b['home_spread']:+g}" if b["home_spread"] is not None else "")
                 )
         print()
+
+
+# ---------------------------------------------------------------------------
+# Market snapshot helpers
+# ---------------------------------------------------------------------------
+
+def consensus_index(target_date: "date | None" = None) -> dict[tuple[str, str], dict]:
+    """No-vig consensus probabilities keyed by ``(home_team, away_team)``.
+
+    Action Network does not expose NHL game IDs, so matchups are the join key.
+    Returns an empty mapping rather than raising when odds are unavailable —
+    a missing market price should never take down a prediction run.
+    """
+    try:
+        games = fetch_odds(target_date)
+    except Exception as e:
+        logger.warning("Odds fetch failed for %s: %s", target_date, e)
+        return {}
+
+    index: dict[tuple[str, str], dict] = {}
+    for g in games:
+        con = g.get("consensus")
+        if not con or con.get("prob_home_win") is None:
+            continue
+        index[(g["home_team"], g["away_team"])] = {
+            "market_prob_home": float(con["prob_home_win"]),
+            "market_n_books": int(con.get("n_books") or 0),
+            "market_status": g.get("status"),
+        }
+    logger.info("Market consensus available for %d games on %s", len(index), target_date)
+    return index

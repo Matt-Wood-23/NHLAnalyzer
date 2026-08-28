@@ -208,6 +208,162 @@ def evaluated_only(hist: pd.DataFrame) -> pd.DataFrame:
 
 
 # ---------------------------------------------------------------------------
+# Market prices and closing-line value
+# ---------------------------------------------------------------------------
+
+def backfill_closing_odds(hist: pd.DataFrame, max_dates: int = 60) -> pd.DataFrame:
+    """Fill in the closing market price for games that have been played.
+
+    Two prices matter and they answer different questions.  ``market_prob_home``
+    is recorded when the prediction is made and says whether the model
+    disagreed with the market.  ``closing_prob_home`` is the last price before
+    puck drop and says whether the market later moved toward the model's side —
+    the standard leading indicator, because prices are far less noisy than
+    results.
+
+    Only games already played are fetched, one request per date, skipping dates
+    already complete.
+    """
+    if hist.empty or "predicted_at" not in hist.columns:
+        return hist
+
+    from ingestion.action_network import consensus_index
+
+    hist = hist.copy()
+    for col in ("closing_prob_home", "closing_n_books"):
+        if col not in hist.columns:
+            hist[col] = np.nan
+
+    played = hist["actual_home_win"].notna() if "actual_home_win" in hist.columns else True
+    todo = hist[played & hist["closing_prob_home"].isna()]
+    if todo.empty:
+        logger.info("Closing prices already complete")
+        return hist
+
+    dates = sorted(todo["predicted_at"].astype(str).str[:10].unique())
+    if len(dates) > max_dates:
+        logger.warning("%d dates need closing prices; fetching the %d most recent",
+                       len(dates), max_dates)
+        dates = dates[-max_dates:]
+
+    filled = 0
+    for day in dates:
+        index = consensus_index(pd.Timestamp(day).date())
+        if not index:
+            continue
+        rows = hist.index[
+            (hist["predicted_at"].astype(str).str[:10] == day)
+            & hist["closing_prob_home"].isna()
+        ]
+        for i in rows:
+            match = index.get((hist.at[i, "home_team"], hist.at[i, "away_team"]))
+            if match:
+                hist.at[i, "closing_prob_home"] = match["market_prob_home"]
+                hist.at[i, "closing_n_books"] = match["market_n_books"]
+                filled += 1
+
+    logger.info("Closing prices filled for %d predictions across %d dates",
+                filled, len(dates))
+    return hist
+
+
+def _market_frame(hist: pd.DataFrame, price_col: str) -> pd.DataFrame:
+    """Scored predictions that also carry a usable market price."""
+    done = evaluated_only(hist)
+    if done.empty or price_col not in done.columns:
+        return done.iloc[0:0]
+    return done[pd.to_numeric(done[price_col], errors="coerce").notna()].copy()
+
+
+def market_comparison(hist: pd.DataFrame, price_col: str = "closing_prob_home") -> dict:
+    """Score the model against the market on identical games.
+
+    The market is the benchmark that matters — always-pick-home only says the
+    model beat a naive rule.  Beating the closing price is what "has an edge"
+    actually means.
+    """
+    df = _market_frame(hist, price_col)
+    if df.empty:
+        return {"n": 0}
+
+    y = (pd.to_numeric(df["actual_home_win"], errors="coerce") == 1).astype(float)
+    model = pd.to_numeric(df["prob_home_win"], errors="coerce")
+    market = pd.to_numeric(df[price_col], errors="coerce")
+
+    return {
+        "n": len(df),
+        "model_brier": float(((model - y) ** 2).mean()),
+        "market_brier": float(((market - y) ** 2).mean()),
+        "model_accuracy": float(((model >= 0.5) == (y == 1)).mean()),
+        "market_accuracy": float(((market >= 0.5) == (y == 1)).mean()),
+        "mean_abs_edge": float((model - market).abs().mean()),
+    }
+
+
+def clv_summary(hist: pd.DataFrame) -> dict:
+    """Did the market move toward the side the model picked?
+
+    Positive closing-line value means the model was early to information the
+    market later priced in — the clearest evidence of a real edge, and it shows
+    up in weeks rather than the season that win/loss records need.
+    """
+    df = _market_frame(hist, "closing_prob_home")
+    if df.empty or "market_prob_home" not in df.columns:
+        return {"n": 0}
+    df = df[pd.to_numeric(df["market_prob_home"], errors="coerce").notna()]
+    if df.empty:
+        return {"n": 0}
+
+    opening = pd.to_numeric(df["market_prob_home"], errors="coerce")
+    closing = pd.to_numeric(df["closing_prob_home"], errors="coerce")
+    picked_home = pd.to_numeric(df["prob_home_win"], errors="coerce") >= 0.5
+
+    # Movement in the direction of our pick, in probability points.
+    move = np.where(picked_home, closing - opening, opening - closing)
+    return {
+        "n": len(df),
+        "mean_clv": float(np.mean(move)),
+        "beat_close_rate": float(np.mean(move > 0)),
+    }
+
+
+def edge_realization(hist: pd.DataFrame, price_col: str = "closing_prob_home") -> pd.DataFrame:
+    """Group predictions by claimed edge and check whether it materialised.
+
+    The question the whole exercise exists to answer: when the model said it
+    had five points on the market, did those games actually win five points
+    more often?
+    """
+    df = _market_frame(hist, price_col)
+    if df.empty:
+        return pd.DataFrame()
+
+    model = pd.to_numeric(df["prob_home_win"], errors="coerce")
+    market = pd.to_numeric(df[price_col], errors="coerce")
+    y = (pd.to_numeric(df["actual_home_win"], errors="coerce") == 1).astype(float)
+
+    # Always from the perspective of the side the model favours.
+    picked_home = model >= 0.5
+    df = df.assign(
+        edge=np.where(picked_home, model - market, (1 - model) - (1 - market)),
+        won=np.where(picked_home, y, 1 - y),
+        model_p=np.where(picked_home, model, 1 - model),
+        market_p=np.where(picked_home, market, 1 - market),
+    )
+    df["bucket"] = pd.cut(
+        df["edge"], bins=[-1, -0.05, -0.02, 0.02, 0.05, 1],
+        labels=["< -5%", "-5..-2%", "-2..+2%", "+2..+5%", "> +5%"],
+    )
+    table = df.groupby("bucket", observed=True).agg(
+        n=("won", "count"),
+        model_said=("model_p", "mean"),
+        market_said=("market_p", "mean"),
+        actual=("won", "mean"),
+    )
+    return table[table["n"] > 0]
+
+
+# ---------------------------------------------------------------------------
 # Metrics
 # ---------------------------------------------------------------------------
 
@@ -368,6 +524,27 @@ def print_accuracy_report(hist: pd.DataFrame, season: str | None = None) -> None
                 f"actual={row['actual']:.1%}, n={int(row['n'])}"
             )
 
+    mkt = market_comparison(scoped)
+    if mkt["n"]:
+        print(f"\nvs the market ({mkt['n']} games with a closing price):")
+        print(f"    Brier      model {mkt['model_brier']:.4f}   market {mkt['market_brier']:.4f}"
+              f"   ({mkt['model_brier'] - mkt['market_brier']:+.4f})")
+        print(f"    Accuracy   model {mkt['model_accuracy']:.1%}     market {mkt['market_accuracy']:.1%}")
+        print(f"    mean |edge| claimed: {mkt['mean_abs_edge']:.1%}")
+
+        er = edge_realization(scoped)
+        if not er.empty:
+            print(f"\ndid the claimed edge show up?")
+            for b, r in er.iterrows():
+                print(f"    {str(b):>9}: n={int(r['n']):>3}  model {r['model_said']:.1%}"
+                      f"  market {r['market_said']:.1%}  actual {r['actual']:.1%}")
+
+        clv = clv_summary(scoped)
+        if clv["n"]:
+            print(f"\nclosing-line value ({clv['n']} games): "
+                  f"{clv['mean_clv']:+.2%} mean move toward our side, "
+                  f"beat the close {clv['beat_close_rate']:.0%} of the time")
+
     recent = recent_form(scoped, last_n=25)
     if recent["n"] >= 10:
         print(f"\n  Last {recent['n']} predictions:")
@@ -395,6 +572,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     hist = backfill_outcomes()
+    if not hist.empty:
+        hist = backfill_closing_odds(hist)
+        hist.to_parquet(HISTORY_PATH, index=False)
     if hist.empty:
         print("No prediction history to evaluate yet.")
     else:

@@ -495,8 +495,8 @@ def format_history_embed(
     working *this* year — and mixes results from different trained models.
     """
     from pipeline.evaluate_history import (
-        calibration_table, confidence_breakdown, coverage_warning,
-        filter_season, load_history, recent_form, summarize,
+        calibration_table, clv_summary, confidence_breakdown, coverage_warning,
+        filter_season, load_history, market_comparison, recent_form, summarize,
     )
 
     hist = load_history()
@@ -590,6 +590,31 @@ def format_history_embed(
         fields.append({
             "name": "Calibration (said vs actual home win rate)",
             "value": "```\n" + "\n".join(lines) + "\n```",
+            "inline": False,
+        })
+
+    # ---- vs the market: the benchmark that decides whether this is worth it ----
+    mkt = market_comparison(scoped)
+    if mkt["n"]:
+        gap = mkt["model_brier"] - mkt["market_brier"]
+        lines = [
+            f"{'':<10}{'model':>9}{'market':>9}",
+            f"{'Brier':<10}{mkt['model_brier']:>9.4f}{mkt['market_brier']:>9.4f}",
+            f"{'Accuracy':<10}{mkt['model_accuracy']:>8.1%}{mkt['market_accuracy']:>9.1%}",
+        ]
+        note = (
+            f"{'ahead by' if gap < 0 else 'behind by'} {abs(gap):.4f} Brier "
+            f"on {mkt['n']} games"
+        )
+        clv = clv_summary(scoped)
+        if clv["n"]:
+            note += (
+                f"\nLine moved our way {clv['beat_close_rate']:.0%} of the time "
+                f"({clv['mean_clv']:+.1%} avg)"
+            )
+        fields.append({
+            "name": "vs the closing line",
+            "value": "```\n" + "\n".join(lines) + "\n```" + note,
             "inline": False,
         })
 

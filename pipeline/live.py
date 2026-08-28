@@ -578,6 +578,45 @@ def predict(
 
 
 # ---------------------------------------------------------------------------
+# Market prices
+# ---------------------------------------------------------------------------
+
+def attach_market_prices(predictions: pd.DataFrame, target_date: date) -> pd.DataFrame:
+    """Add the market's no-vig probability for each game, where available.
+
+    The model's edge is only meaningful against a price, so the price has to
+    be recorded alongside the prediction.  Odds move continuously and
+    historical lines are not freely available, so a line not captured at
+    prediction time is lost.
+    """
+    if predictions.empty:
+        return predictions
+
+    from ingestion.action_network import consensus_index
+
+    index = consensus_index(target_date)
+    predictions = predictions.copy()
+    if not index:
+        logger.warning("No market prices for %s — edge cannot be scored later", target_date)
+        predictions["market_prob_home"] = np.nan
+        predictions["market_n_books"] = np.nan
+        return predictions
+
+    matched = predictions.apply(
+        lambda r: index.get((r["home_team"], r["away_team"]), {}), axis=1,
+    )
+    predictions["market_prob_home"] = [m.get("market_prob_home", np.nan) for m in matched]
+    predictions["market_n_books"] = [m.get("market_n_books", np.nan) for m in matched]
+
+    hit = int(predictions["market_prob_home"].notna().sum())
+    logger.info("Market price matched for %d/%d games", hit, len(predictions))
+    if hit < len(predictions):
+        for _, r in predictions[predictions["market_prob_home"].isna()].iterrows():
+            logger.warning("No market price: %s @ %s", r["away_team"], r["home_team"])
+    return predictions
+
+
+# ---------------------------------------------------------------------------
 # Save prediction history (Parquet — always works, no DB needed)
 # ---------------------------------------------------------------------------
 
@@ -590,7 +629,8 @@ def save_prediction_history(predictions: pd.DataFrame, model_name: str) -> Path:
     records["model_name"] = model_name
     records["predicted_at"] = datetime.now(timezone.utc).isoformat()
     # Include ELO and feature coverage if available
-    for col in ["home_elo", "away_elo", "feature_coverage"]:
+    for col in ["home_elo", "away_elo", "feature_coverage",
+                "market_prob_home", "market_n_books"]:
         if col in predictions.columns:
             records[col] = predictions[col]
 
@@ -726,6 +766,12 @@ def run(
     if predictions.empty:
         return pd.DataFrame()
 
+    # 5b. Market price at prediction time.  Best-effort: a missing line costs
+    #     a column, never a prediction.  This is the perishable half of the
+    #     record — odds move, and a price not captured now cannot be
+    #     reconstructed later.
+    predictions = attach_market_prices(predictions, target_date)
+
     # 6. Always save prediction history (Parquet)
     save_prediction_history(predictions, model_name)
 
@@ -737,7 +783,7 @@ def run(
     display_cols = [
         "game_id", "home_team", "away_team", "prob_home_win",
         "home_back_to_back", "away_back_to_back", "rest_advantage",
-        "home_elo", "away_elo", "feature_coverage",
+        "home_elo", "away_elo", "feature_coverage", "market_prob_home",
     ]
     keep = [c for c in display_cols if c in predictions.columns]
     return predictions[keep]
