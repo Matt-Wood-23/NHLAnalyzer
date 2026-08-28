@@ -67,9 +67,10 @@ python -m models.xgboost_model --trials 150 --ensemble --calibration none --feat
 # 7. Retrain and serialize the production model
 python -m pipeline.train --model random_forest
 
-# 7b. Retrain the SOG props model on the extra season
+# 7b. Retrain the SOG props model on the extra season.
+#     --save is required; without it the script only evaluates.
 #     (pipeline.backfill rebuilds player_game_stats.parquet for it)
-python -m models.sog_model
+python -m models.sog_model --save
 
 # 8. Dry-run a prediction
 python -m pipeline.live --dry-run

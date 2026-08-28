@@ -1,0 +1,6 @@
+{
+  "k_factor": 15.0,
+  "home_advantage": 30.0,
+  "season_regress": 0.5,
+  "ot_win_value": 0.6
+}
