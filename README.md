@@ -260,6 +260,43 @@ biased high.
 
 ![SOG props command](sogprediction.png)
 
+### /saves — Goalie Saves Projections
+
+Projected saves for each team's probable starter, with P(over) at 22.5 / 24.5 /
+27.5 / 30.5. The probability leads because it is what a bet is against; the
+point estimate is not.
+
+| Line | Brier | no-skill | skill | Accuracy | majority |
+|-----:|------:|---------:|------:|---------:|---------:|
+| 22.5 | 0.2017 | 0.2168 | 7.0% | 69.8% | 69.4% |
+| 24.5 | 0.2288 | 0.2489 | 8.1% | 61.9% | 58.8% |
+| 27.5 | 0.2277 | 0.2488 | 8.5% | 63.2% | 59.3% |
+| 30.5 | 0.1865 | 0.2008 | 7.1% | 72.8% | 72.9% |
+
+Saves are shots faced times save rate. Save rate barely moves — the league sits
+near .905 — so nearly all the variance is workload, which is a team property
+before it is a goalie one. The features reflect that: the goalie's own rolling
+shots-against alongside how much his team concedes and how much tonight's
+opponent generates.
+
+Two things differ from the SOG model. **Saves are overdispersed** — variance
+runs ~1.9x the mean, and still 1.8x after excluding short outings, so it is not
+just pulled goalies. Poisson tails come out too tight and P(over) reads more
+confident than the data supports, so the probability transform is negative
+binomial with a dispersion estimated from training residuals and saved
+alongside the model. **The drift is steeper**: starter saves fell from 28.4 a
+game in 2021-22 to 24.8 in 2025-26. Recency weighting and newest-season
+calibration still leave +0.68 saves of bias, because both stop at the newest
+*training* season while the test season is a further step down — almost exactly
+one season of drift. `pipeline/saves_live.py` closes most of the rest with a
+serve-time factor fit on the current season's completed starts, which uses only
+finished games and so leaks nothing.
+
+**Starters are inferred, not confirmed.** The NHL publishes no stable
+pre-game starter endpoint, so this takes each team's most recent starter —
+right most nights, wrong on the back half of a back-to-back. Every row carries
+`starter_basis` so you can see what you are trusting.
+
 ### Other Commands
 
 - **/elo** — Current ELO rankings for all 32 teams
@@ -339,9 +376,9 @@ python -m pipeline.live --dry-run
 python -m pipeline.live --date 2026-03-15 --dry-run
 
 # Post predictions to Discord
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... python -m bot.discord_bot --webhook
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... python -m bot.discord_bot --webhook --props --saves
 
-# Run the Discord bot (slash commands: /predictions, /props, /elo, /history)
+# Run the Discord bot (slash commands: /predictions, /props, /saves, /elo, /history)
 DISCORD_BOT_TOKEN=... python -m bot.discord_bot --bot
 
 # Evaluate prediction accuracy over time
@@ -382,6 +419,9 @@ NHLAnalyzer/
     baseline.py             # RF + Logistic Regression baselines
     xgboost_model.py        # XGBoost + LightGBM + ensemble
     stacking.py             # Stacking meta-learner
+    count_model.py          # Shared Poisson-props machinery: recency weighting,
+                            #   drift calibration, dispersion, honest scoring
+    saves_model.py          # Goalie saves prop — negative binomial
     sog_model.py            # Shots on goal (player props) — trains and
                             #   predicts from player_game_stats.parquet
     evaluate.py             # Evaluation metrics framework

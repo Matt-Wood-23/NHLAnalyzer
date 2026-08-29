@@ -72,6 +72,10 @@ python -m pipeline.train --model random_forest
 #     (pipeline.backfill rebuilds player_game_stats.parquet for it)
 python -m models.sog_model --save
 
+# 7c. Retrain the goalie saves model, likewise.
+#     (pipeline.backfill rebuilds goalie_game_stats.parquet for it)
+python -m models.saves_model --save
+
 # 8. Dry-run a prediction
 python -m pipeline.live --dry-run
 ```
@@ -88,6 +92,7 @@ seen the most recent season.
 | `python -m pipeline.live --dry-run` | Games appear, no "Missing snapshot" warnings |
 | `home_elo` / `away_elo` | Near 1500 and clustered — ratings regressed at the season boundary |
 | Rolling features | Mostly NaN on day one, and that is correct |
+| `python -m pipeline.saves_live` | `in_season_factor` is 1.0 for ~3 weeks, then drifts below it |
 | `python -m pipeline.props_live --dry-run` | Silent until skaters reach 5 games |
 
 ### Expect no predictions for the first few days

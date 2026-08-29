@@ -7,15 +7,15 @@ Two modes:
        Requires: DISCORD_WEBHOOK_URL env var.
 
   2. Bot mode (persistent, slash commands):
-       Full py-cord bot with /predictions and /props commands.
+       Full py-cord bot with /predictions, /props and /saves commands.
        Requires: DISCORD_BOT_TOKEN env var.
 
 Usage:
     # One-shot webhook post for today's games
     python -m bot.discord_bot --webhook
 
-    # One-shot webhook post with SOG props too
-    python -m bot.discord_bot --webhook --props
+    # One-shot webhook post with props too
+    python -m bot.discord_bot --webhook --props --saves
 
     # One-shot webhook post for a specific date
     python -m bot.discord_bot --webhook --date 2026-03-10
@@ -48,6 +48,7 @@ _COLOR_PROPS = 0xF1C40F   # gold  — SOG props
 _COLOR_ELO   = 0x9B59B6   # purple — ELO rankings
 _COLOR_HIST  = 0x3498DB   # blue   — prediction history
 _COLOR_RECAP = 0x2ECC71   # green  — team recap
+_COLOR_SAVES = 0x16A085   # teal   — goalie saves props
 
 _TEAM_EMOJI: dict[str, str] = {
     "ANA": "🦆", "BOS": "🐻", "BUF": "🦬", "CAR": "🌀", "CBJ": "💥",
@@ -290,6 +291,61 @@ def format_props_embeds(props_df, pred_date: date) -> list[dict]:
         })
 
     return embeds
+
+
+# ---------------------------------------------------------------------------
+# Embed builders — goalie saves props
+# ---------------------------------------------------------------------------
+
+def format_saves_embeds(saves_df, pred_date: date, line: float = 24.5) -> list[dict]:
+    """Build Discord embeds for goalie saves projections.
+
+    Leads with P(over) rather than the projection, because the probability is
+    the number a bet is actually against and the point estimate is not.
+    """
+    if saves_df is None or len(saves_df) == 0:
+        return []
+
+    prob_col = f"p_over_{line}"
+    if prob_col not in saves_df.columns:
+        available = [c for c in saves_df.columns if c.startswith("p_over_")]
+        if not available:
+            return []
+        prob_col = available[0]
+        line = float(prob_col.rsplit("_", 1)[1])
+
+    rows = saves_df.to_dict("records")
+    header = {
+        "title": f"🧤 Goalie Saves — {pred_date.strftime('%A, %B %d %Y')}",
+        "description": (
+            f"{len(rows)} probable starter{'s' if len(rows) != 1 else ''} "
+            f"· P(over) at {line} · No book lines · Research use only"
+        ),
+        "color": _COLOR_SAVES,
+    }
+
+    fmt = "`{:<20} {:>4} {:>6} {:>7}`"
+    lines = [fmt.format("Goalie", "Opp", "xSaves", f"O{line}"),
+             "`" + "-" * 41 + "`"]
+    for r in rows:
+        lines.append(fmt.format(
+            str(r.get("goalie_name", ""))[:20],
+            str(r.get("opponent", ""))[:4],
+            f"{r.get('expected_saves', 0.0):.1f}",
+            f"{r.get(prob_col, 0.0):.0%}",
+        ))
+
+    basis = rows[0].get("starter_basis", "inferred")
+    factor = rows[0].get("in_season_factor", 1.0)
+    note = f"Starters: {basis} — not a confirmed lineup."
+    if factor and abs(factor - 1.0) > 0.005:
+        note += f" In-season drift correction x{factor:.3f}."
+
+    return [header, {
+        "description": "\n".join(lines),
+        "color": _COLOR_SAVES,
+        "footer": {"text": f"NHL Analyzer • Saves Model · {note}"},
+    }]
 
 
 # ---------------------------------------------------------------------------
@@ -678,8 +734,9 @@ def send_predictions_webhook(
     webhook_url: str,
     pred_date: Optional[date] = None,
     props_df=None,
+    saves_df=None,
 ) -> bool:
-    """Format and post daily predictions (and optionally SOG props) to a Discord webhook."""
+    """Format and post daily predictions (and optionally props) to a Discord webhook."""
     if pred_date is None:
         pred_date = date.today()
 
@@ -709,6 +766,12 @@ def send_predictions_webhook(
     if props_df is not None and len(props_df) > 0:
         props_embeds = format_props_embeds(props_df, pred_date)
         if props_embeds and not post_webhook(webhook_url, props_embeds):
+            return False
+
+    # Goalie saves, likewise its own POST
+    if saves_df is not None and len(saves_df) > 0:
+        saves_embeds = format_saves_embeds(saves_df, pred_date)
+        if saves_embeds and not post_webhook(webhook_url, saves_embeds):
             return False
 
     return True
@@ -820,6 +883,30 @@ def run_bot(token: str) -> None:
             logger.error("props_cmd error: %s", e)
             await ctx.followup.send(f"Error generating SOG projections: {e}")
 
+    @bot.slash_command(name="saves", description="Goalie saves projections for today's probable starters")
+    async def saves_cmd(
+        ctx: discord.ApplicationContext,
+        date_str: discord.Option(str, "Date (YYYY-MM-DD)", required=False, default=""),
+        line: discord.Option(float, "Line to price (default 24.5)", required=False, default=24.5),
+    ):
+        await ctx.defer()
+        try:
+            from pipeline.saves_live import run as saves_run
+            target = date.fromisoformat(date_str) if date_str else date.today()
+            saves = saves_run(target_date=target)
+
+            if saves.empty:
+                await ctx.followup.send(f"No saves projections found for {target}.")
+                return
+
+            embeds = format_saves_embeds(saves, target, line=line)
+            await ctx.followup.send(
+                embeds=[discord.Embed.from_dict(e) for e in embeds]
+            )
+        except Exception as e:
+            logger.error("saves_cmd error: %s", e)
+            await ctx.followup.send(f"Error generating saves projections: {e}")
+
     @bot.slash_command(name="recap", description="Show recent form for an NHL team (last N games)")
     async def recap_cmd(
         ctx: discord.ApplicationContext,
@@ -903,6 +990,8 @@ if __name__ == "__main__":
                         help="Date for predictions (YYYY-MM-DD). Default: today.")
     parser.add_argument("--props", action="store_true",
                         help="Also post SOG props projections (webhook mode only)")
+    parser.add_argument("--saves", action="store_true",
+                        help="Also post goalie saves projections (webhook mode only)")
     args = parser.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -930,7 +1019,15 @@ if __name__ == "__main__":
             logger.info("Running SOG props pipeline...")
             props = props_run(target_date=target)
 
-        success = send_predictions_webhook(preds, webhook_url, pred_date=target, props_df=props)
+        saves = None
+        if args.saves:
+            from pipeline.saves_live import run as saves_run
+            logger.info("Running goalie saves pipeline...")
+            saves = saves_run(target_date=target)
+
+        success = send_predictions_webhook(
+            preds, webhook_url, pred_date=target, props_df=props, saves_df=saves,
+        )
 
         if conn:
             conn.close()

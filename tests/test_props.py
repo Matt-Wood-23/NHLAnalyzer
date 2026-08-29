@@ -258,10 +258,10 @@ class TestCalibration:
         """props_live calls pipeline.predict directly, so the pickle must
         already be calibrated — nothing downstream applies a factor."""
         import inspect
-        from models import sog_model
+        from models import count_model
 
-        source = inspect.getsource(sog_model.fit_pipeline)
-        assert "_apply_calibration" in source
+        source = inspect.getsource(count_model.fit_pipeline)
+        assert "apply_calibration" in source
 
         serving = inspect.getsource(props_live.run)
         assert "calibrat" not in serving.lower(), (
