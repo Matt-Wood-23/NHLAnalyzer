@@ -1,0 +1,760 @@
+<title>Props Overhaul Handoff</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --ground:   #EFF3F6;
+    --surface:  #FFFFFF;
+    --sunken:   #E4EAEF;
+    --ink:      #0F1922;
+    --ink-soft: #33434F;
+    --muted:    #5C6B78;
+    --line:     #D3DCE3;
+    --line-soft:#E2E9EE;
+    --accent:   #BE2F2A;
+    --good:     #2C6A52;
+    --good-bg:  #DDEBE4;
+    --warn:     #8C6220;
+    --warn-bg:  #F2E8D6;
+    --crit:     #A32A24;
+    --crit-bg:  #F5DEDC;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+    --measure: 66ch;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #0C131A;
+      --surface:  #121C25;
+      --sunken:   #18242E;
+      --ink:      #E5EDF3;
+      --ink-soft: #C0CCD6;
+      --muted:    #8B9AA7;
+      --line:     #24323E;
+      --line-soft:#1B2731;
+      --accent:   #E56A63;
+      --good:     #5EA684;
+      --good-bg:  #172C24;
+      --warn:     #C7A063;
+      --warn-bg:  #2B2318;
+      --crit:     #E56A63;
+      --crit-bg:  #2E1917;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #0C131A;
+    --surface:  #121C25;
+    --sunken:   #18242E;
+    --ink:      #E5EDF3;
+    --ink-soft: #C0CCD6;
+    --muted:    #8B9AA7;
+    --line:     #24323E;
+    --line-soft:#1B2731;
+    --accent:   #E56A63;
+    --good:     #5EA684;
+    --good-bg:  #172C24;
+    --warn:     #C7A063;
+    --warn-bg:  #2B2318;
+    --crit:     #E56A63;
+    --crit-bg:  #2E1917;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.5rem 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 62rem;
+    margin: 0 auto;
+    display: flex;
+    flex-direction: column;
+    gap: 3.25rem;
+  }
+
+  /* ---------- masthead ---------- */
+
+  .masthead {
+    padding: 3.5rem 0 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    font-weight: 500;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(2.1rem, 5.5vw, 3.1rem);
+    line-height: 1.06;
+    letter-spacing: -0.022em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 1.1rem;
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0;
+  }
+
+  .statusbar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 2rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--muted);
+  }
+  .statusbar b {
+    color: var(--ink);
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* ---------- sections ---------- */
+
+  section {
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  h2 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.45rem;
+    letter-spacing: -0.012em;
+    margin: 0;
+    padding-bottom: 0.5rem;
+    border-bottom: 2px solid var(--ink);
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.02rem;
+    letter-spacing: -0.005em;
+    margin: 0;
+  }
+
+  p { margin: 0; max-width: var(--measure); }
+  .lede { color: var(--ink-soft); }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.87em;
+    background: var(--sunken);
+    padding: 0.1em 0.36em;
+    border-radius: 3px;
+  }
+
+  strong { font-weight: 600; }
+
+  /* ---------- the correction stack ---------- */
+
+  .stack {
+    display: grid;
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .step {
+    background: var(--surface);
+    padding: 1.15rem 1.35rem;
+    display: grid;
+    grid-template-columns: 2.25rem 1fr;
+    gap: 0 1rem;
+    align-items: baseline;
+  }
+
+  .step-n {
+    font-family: var(--mono);
+    font-size: 0.95rem;
+    font-weight: 600;
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .step p {
+    grid-column: 2;
+    font-size: 0.94rem;
+    color: var(--ink-soft);
+    margin-top: 0.3rem;
+  }
+
+  .reach {
+    grid-column: 2;
+    margin-top: 0.55rem;
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+    letter-spacing: 0.01em;
+  }
+
+  /* ---------- scorecards ---------- */
+
+  .cards {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+    gap: 1.25rem;
+  }
+
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.4rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.9rem;
+  }
+
+  .card-head {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+
+  .dist {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .scroller { overflow-x: auto; }
+
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-family: var(--mono);
+    font-size: 0.82rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  th {
+    text-align: right;
+    font-weight: 500;
+    font-size: 0.7rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 0 0 0.5rem 0.85rem;
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  th:first-child { text-align: left; padding-left: 0; }
+
+  td {
+    text-align: right;
+    padding: 0.42rem 0 0.42rem 0.85rem;
+    border-bottom: 1px solid var(--line-soft);
+    color: var(--ink-soft);
+    white-space: nowrap;
+  }
+  td:first-child { text-align: left; padding-left: 0; color: var(--ink); font-weight: 500; }
+  tr:last-child td { border-bottom: none; }
+
+  .skill { color: var(--good); font-weight: 600; }
+  .tied  { color: var(--muted); }
+
+  .note {
+    font-size: 0.88rem;
+    color: var(--muted);
+    margin: 0;
+  }
+
+  /* ---------- verdict blocks ---------- */
+
+  .verdicts {
+    display: flex;
+    flex-direction: column;
+    gap: 0.85rem;
+  }
+
+  .verdict {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-left: 3px solid var(--crit);
+    border-radius: 3px;
+    padding: 1.1rem 1.3rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+
+  .verdict h3 { font-size: 0.97rem; }
+  .verdict p { font-size: 0.92rem; color: var(--ink-soft); }
+
+  .why {
+    font-size: 0.86rem;
+    color: var(--muted);
+    padding-top: 0.35rem;
+    border-top: 1px solid var(--line-soft);
+    max-width: var(--measure);
+  }
+  .why b { color: var(--crit); font-weight: 600; }
+
+  /* ---------- open items ---------- */
+
+  .queue {
+    display: grid;
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    overflow: hidden;
+  }
+
+  .item {
+    background: var(--surface);
+    padding: 1.1rem 1.3rem;
+    display: flex;
+    flex-direction: column;
+    gap: 0.4rem;
+  }
+  .item.top { background: var(--warn-bg); }
+
+  .item-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+  }
+
+  .tag {
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    font-weight: 600;
+    letter-spacing: 0.07em;
+    text-transform: uppercase;
+    padding: 0.16rem 0.45rem;
+    border-radius: 3px;
+    white-space: nowrap;
+  }
+  .tag.blocker { background: var(--warn-bg); color: var(--warn); border: 1px solid currentColor; }
+  .tag.bug     { background: var(--crit-bg); color: var(--crit); }
+  .tag.build   { background: var(--good-bg); color: var(--good); }
+  .tag.tidy    { background: var(--sunken); color: var(--muted); }
+
+  .item p { font-size: 0.9rem; color: var(--ink-soft); }
+
+  /* ---------- correlation readout ---------- */
+
+  .readout {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1.3rem;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+    gap: 1.25rem;
+  }
+
+  .metric { display: flex; flex-direction: column; gap: 0.15rem; }
+  .metric-label {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+  .metric-value {
+    font-family: var(--display);
+    font-size: 1.65rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-variant-numeric: tabular-nums;
+  }
+  .metric-value.flat { color: var(--muted); }
+  .metric-value.live { color: var(--good); }
+  .metric-sub { font-size: 0.8rem; color: var(--muted); }
+
+  footer {
+    border-top: 1px solid var(--line);
+    padding-top: 1.25rem;
+    font-size: 0.86rem;
+    color: var(--muted);
+    max-width: var(--measure);
+  }
+
+  @media (max-width: 34rem) {
+    .step { grid-template-columns: 1fr; }
+    .step-n { grid-column: 1; }
+    .step h3, .step p, .reach { grid-column: 1; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <div class="eyebrow">NHLAnalyzer · Handoff 2 · 29 August 2026</div>
+    <h1>Props Overhaul</h1>
+    <p class="standfirst">
+      Two of the three findings started as “add a feature” and ended as “the
+      number you were reading was wrong.” Everything here was run against real
+      data.
+    </p>
+    <div class="statusbar">
+      <span><b>3</b> commits, unpushed</span>
+      <span><b>224</b> tests passing <span style="opacity:.7">(was 147)</span></span>
+      <span><b>2</b> props models</span>
+      <span><b>8</b> slash commands</span>
+    </div>
+  </header>
+
+  <section>
+    <h2>What was actually wrong</h2>
+    <p class="lede">
+      The SOG model reported 63.6% over/under accuracy against a 0.500 baseline.
+      The line was <code>mean(y_true)</code> — taken from the test set, and not a
+      line any book posts — and at a 2.5 line roughly 72% of player-games go
+      under, so the majority class is the bar. Measured properly the model was
+      overstated about threefold, and in the first walk-forward fold a constant
+      “under” beat it outright.
+    </p>
+    <p class="lede">
+      Separately, combined shots per game have fallen 12% since 2021-22, from
+      63.2 to 55.6. That is not a roster-size artifact — skaters per game is flat
+      at ~30.7. An expanding window inherits the high-volume seasons and
+      over-projects, and the error grows as the gap widens.
+    </p>
+  </section>
+
+  <section>
+    <h2>The drift correction stack</h2>
+    <p class="lede">
+      Three corrections, applied in order, now shared in
+      <code>models/count_model.py</code>. Each one reaches further forward in
+      time than the last — which is the whole reason there are three.
+    </p>
+
+    <div class="stack">
+      <div class="step">
+        <div class="step-n">01</div>
+        <h3>Recency weighting</h3>
+        <p>
+          Training rows decay by season age, half-life 0.5 seasons — a season-old
+          row carries a quarter the weight of a current one.
+        </p>
+        <div class="reach">reaches → the newest training season</div>
+      </div>
+      <div class="step">
+        <div class="step-n">02</div>
+        <h3>Newest-season calibration</h3>
+        <p>
+          A multiplicative factor fit on the most recent training season, folded
+          into the log-link intercept where it is exact:
+          <code>exp(b₀ + log f + bx) = f·exp(b₀ + bx)</code>. The saved pickle is
+          already corrected, so serving needs no extra step.
+        </p>
+        <div class="reach">reaches → the newest training season, precisely</div>
+      </div>
+      <div class="step">
+        <div class="step-n">03</div>
+        <h3>In-season calibration</h3>
+        <p>
+          A serve-time factor fit on the season being played. The first two stop
+          at the newest <em>training</em> season; the season being served is a
+          further step down. Uses only completed games, so nothing leaks.
+        </p>
+        <div class="reach">reaches → tonight</div>
+      </div>
+    </div>
+
+    <p class="note">
+      SOG bias fell +0.092 → +0.051 shots, and on the most recent fold +0.104 →
+      +0.019. Saves needed all three: steps 1–2 left +0.68, which is almost
+      exactly one season of drift; step 3 takes it to +0.36.
+    </p>
+  </section>
+
+  <section>
+    <h2>Where the skill actually is</h2>
+    <p class="lede">
+      Both models are now scored at the half-integer lines books post, against
+      the baselines those lines really have. The accuracy columns are the
+      argument: at 3.5 shots the model calls 86.7% correctly and so does a
+      constant “under.” The skill lives in the probabilities.
+    </p>
+
+    <div class="cards">
+      <div class="card">
+        <div class="card-head">
+          <h3>Shots on goal</h3>
+          <span class="dist">Poisson</span>
+        </div>
+        <div class="scroller">
+          <table>
+            <thead>
+              <tr><th>Line</th><th>Brier</th><th>No-skill</th><th>Skill</th><th>Acc</th><th>Majority</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>1.5</td><td>0.2277</td><td>0.2502</td><td class="skill">9.0%</td><td>62.4%</td><td>52.9%</td></tr>
+              <tr><td>2.5</td><td>0.1787</td><td>0.2013</td><td class="skill">11.2%</td><td>74.1%</td><td>72.2%</td></tr>
+              <tr><td>3.5</td><td>0.1038</td><td>0.1159</td><td class="skill">10.4%</td><td class="tied">86.7%</td><td class="tied">86.7%</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          Skill is consistent across lines; accuracy collapses into the base rate
+          at 3.5, where the model ties always-under.
+        </p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h3>Goalie saves</h3>
+          <span class="dist">Negative binomial</span>
+        </div>
+        <div class="scroller">
+          <table>
+            <thead>
+              <tr><th>Line</th><th>Brier</th><th>No-skill</th><th>Skill</th><th>Acc</th><th>Majority</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>22.5</td><td>0.2017</td><td>0.2168</td><td class="skill">7.0%</td><td>69.8%</td><td>69.4%</td></tr>
+              <tr><td>24.5</td><td>0.2288</td><td>0.2489</td><td class="skill">8.1%</td><td>61.9%</td><td>58.8%</td></tr>
+              <tr><td>27.5</td><td>0.2277</td><td>0.2488</td><td class="skill">8.5%</td><td>63.2%</td><td>59.3%</td></tr>
+              <tr><td>30.5</td><td>0.1865</td><td>0.2008</td><td class="skill">7.1%</td><td class="tied">72.8%</td><td class="tied">72.9%</td></tr>
+            </tbody>
+          </table>
+        </div>
+        <p class="note">
+          Saves run variance 1.9× the mean — still 1.8× excluding short outings,
+          so it is not just pulled goalies. Poisson tails come out too tight;
+          the negative binomial transform is worth 1–7% Brier at every line.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Three things that looked like wins and were not</h2>
+    <p class="lede">
+      Recorded so nobody re-derives them. Each survived a first look and failed a
+      second.
+    </p>
+
+    <div class="verdicts">
+      <div class="verdict">
+        <h3>Retroactive closing-line value</h3>
+        <p>
+          Backfilled closing prices on 91 games put the model 0.0053 Brier ahead
+          of the market. The bootstrap CI is [−0.0195, +0.0088] — it spans zero.
+        </p>
+        <p class="why">
+          <b>Why it isn’t real:</b> model mean P(home) was 0.500 against the
+          market’s 0.538, in a sample where home teams won only 45.1%. A flat 50%
+          forecast would have scored 0.2500 against the market’s 0.2533. The
+          market’s correct home lean is what cost it.
+        </p>
+      </div>
+
+      <div class="verdict">
+        <h3>Shrinking low-experience rolling averages</h3>
+        <p>
+          The obvious fix for noisy rookie features: shrink them toward the league
+          mean. Bias got <em>worse</em>, +0.174 → +0.196.
+        </p>
+        <p class="why">
+          <b>Why it isn’t real:</b> fringe players average 1.44 shots against a
+          league 1.94. They sit below average, so shrinking toward the mean pulls
+          them up — exactly backwards.
+        </p>
+      </div>
+
+      <div class="verdict">
+        <h3>Adding log(games_played) as a feature</h3>
+        <p>
+          Cut low-experience bias 40%, from +0.174 to +0.104. Overall bias rose to
+          +0.074 and Brier degraded at every line.
+        </p>
+        <p class="why">
+          <b>Why it isn’t real:</b> trading a targeted bias for a broader one is
+          not a fix. Documented as a known limitation instead — treat projections
+          under ~20 career games as biased high.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>Parlays: measured, and the answer is no</h2>
+    <p class="lede">
+      The case for same-game parlays is that legs correlate, so the true joint
+      probability beats the product a book prices. For shots on goal it is simply
+      false — even between linemates.
+    </p>
+
+    <div class="readout">
+      <div class="metric">
+        <div class="metric-label">Teammate SOG</div>
+        <div class="metric-value flat">r = 0.010</div>
+        <div class="metric-sub">874k pairs · lift 1.02</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Opponent SOG</div>
+        <div class="metric-value flat">r = −0.001</div>
+        <div class="metric-sub">1.85M pairs · lift 1.00</div>
+      </div>
+      <div class="metric">
+        <div class="metric-label">Saves × own team wins</div>
+        <div class="metric-value live">r = +0.111</div>
+        <div class="metric-sub">lift 1.089 · the real one</div>
+      </div>
+    </div>
+
+    <p class="note">
+      Books shade same-game parlays for correlation that is not there, so a SOG
+      parlay is strictly worse than the legs singly. The one real correlation runs
+      opposite to the folk wisdom: shots faced barely predicts the result
+      (−0.02), so “over saves + team loses” has lift 0.91. The correlated pairing
+      is over saves with his own team’s moneyline.
+    </p>
+  </section>
+
+  <section>
+    <h2>What’s open, ranked</h2>
+
+    <div class="queue">
+      <div class="item top">
+        <div class="item-head">
+          <h3>Join the NHL API boxscore</h3>
+          <span class="tag blocker">unblocks four</span>
+        </div>
+        <p>
+          MoneyPuck’s shot files only contain players who shot, so
+          <code>player_game_stats.parquet</code> has no zero-attempt rows — about
+          30.7 per game against 36 dressed skaters, so ~5 skaters a night vanish.
+          Every rolling average is computed over a survivor set and biased up.
+          The same call also gives confirmed starting goalies, a scratch filter
+          for <code>/props</code>, and points/assists props that shot data cannot
+          provide at all.
+        </p>
+      </div>
+
+      <div class="item">
+        <div class="item-head">
+          <h3><code>--dry-run</code> still writes the prediction log</h3>
+          <span class="tag bug">two-line fix</span>
+        </div>
+        <p>
+          In <code>pipeline/live.py</code>, <code>dry_run</code> only guards the
+          Postgres save. <code>save_prediction_history</code> runs regardless, so
+          a dry run appends to the one irreplaceable file in the repo.
+        </p>
+      </div>
+
+      <div class="item">
+        <div class="item-head">
+          <h3>Season-boundary skew in three snapshots</h3>
+          <span class="tag bug">before opening night</span>
+        </div>
+        <p>
+          <code>_build_goalie_snapshot</code>,
+          <code>_build_special_teams_snapshot</code> and
+          <code>_build_opponent_quality_snapshot</code> take
+          <code>.iloc[-1]</code> across every season, so in the opening week they
+          serve last season’s final values. The team snapshot was fixed last
+          session — the pipeline is now inconsistent about whether snapshots reset
+          at the boundary.
+        </p>
+      </div>
+
+      <div class="item">
+        <div class="item-head">
+          <h3><code>/edge</code></h3>
+          <span class="tag build">build before October</span>
+        </div>
+        <p>
+          Model-versus-market disagreements, ranked. Newly possible because
+          <code>market_prob_home</code> is captured at prediction time. Build it
+          before opening night so it logs from game one — and say in the embed
+          that disagreement is a hypothesis, not edge, until CLV confirms it.
+        </p>
+      </div>
+
+      <div class="item">
+        <div class="item-head">
+          <h3>Game totals</h3>
+          <span class="tag build">next model</span>
+        </div>
+        <p>
+          Mean 6.03 goals, P(over 5.5) = 0.541, and the team matrix already
+          carries xGF/xGA. Attractive because it is a <em>main</em> market, where
+          the vig is a fraction of what props carry — a small edge survives. Use
+          <code>count_model</code>; expect the same drift.
+        </p>
+      </div>
+
+      <div class="item">
+        <div class="item-head">
+          <h3>287 features on 6,877 games</h3>
+          <span class="tag tidy">known win</span>
+        </div>
+        <p>
+          <code>run_feature_selection</code> already exists in
+          <code>models/xgboost_model.py</code>, but production RF uses all of
+          them. Top-20 selection previously improved Brier 0.2416 → 0.2404.
+        </p>
+      </div>
+
+      <div class="item">
+        <div class="item-head">
+          <h3>Dead code and unattended running</h3>
+          <span class="tag tidy">housekeeping</span>
+        </div>
+        <p>
+          <code>ingestion/odds_api.py</code> is Postgres-only and imported
+          nowhere, superseded by <code>action_network.py</code>.
+          <code>pipeline/daily.py</code> imports <code>sys</code> unused. For a
+          cron loop on either the PC or the Pi, what is missing is a lockfile,
+          failure notification through the existing webhook, and retry on the
+          MoneyPuck download.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    Full detail in <code>docs/HANDOFF.md</code> § Session 2. The prediction log
+    at <code>data/predictions/prediction_history.parquet</code> remains the one
+    irreplaceable file — everything else rebuilds from MoneyPuck.
+  </footer>
+
+</div>
