@@ -67,9 +67,14 @@ python -m models.xgboost_model --trials 150 --ensemble --calibration none --feat
 # 7. Retrain and serialize the production model
 python -m pipeline.train --model random_forest
 
+# 7a. Pull the new season's boxscores -- the dressed-lineup spine the SOG
+#     model trains on, plus goalie starter flags.  Final games cache
+#     permanently, so this only fetches the season just played (~40s).
+python -m ingestion.boxscore --backfill --build --merge
+
 # 7b. Retrain the SOG props model on the extra season.
 #     --save is required; without it the script only evaluates.
-#     (pipeline.backfill rebuilds player_game_stats.parquet for it)
+#     (7a rebuilds player_game_stats_full.parquet for it)
 python -m models.sog_model --save
 
 # 7c. Retrain the goalie saves model, likewise.
@@ -94,6 +99,8 @@ seen the most recent season.
 | Rolling features | Mostly NaN on day one, and that is correct |
 | `python -m pipeline.saves_live` | `in_season_factor` is 1.0 for ~3 weeks, then drifts below it |
 | `python -m pipeline.props_live --dry-run` | Silent until skaters reach 5 games |
+| Scratch log line in `props_live` | "No scratches published yet" until roughly an hour before puck drop, then "dropped N of M skaters" |
+| `starter_basis` in `saves_live` | Reads "N of last 10 starts"; N will be small in the opening week because the window is still filling |
 
 ### Expect no predictions for the first few days
 

@@ -213,14 +213,29 @@ Shows each game with win probabilities, pick strength, ELO ratings, and context 
 
 Shows projected shots on goal for skaters, with recent averages and ice time.
 
-Player features are served from `player_game_stats.parquet` — the same file the
-SOG model trains on, aggregated from the MoneyPuck shot data. That matters:
-the NHL API game log has no expected-goals data, so building live features from
-it left `xg`, `shot_attempts` and `xg_per_attempt` empty across both windows —
-six of the model's eleven inputs replaced by training-set means on every
-projection. The NHL API is still used for rosters and ice time, neither of
-which the model consumes. Opponent context comes from the same team snapshot
-the training matrix uses, so the two agree on what `opp_sf_pct_l20` means.
+Player features are served from `player_game_stats_full.parquet` — the same
+file the SOG model trains on. That matters: the NHL API game log has no
+expected-goals data, so building live features from it left `xg`,
+`shot_attempts` and `xg_per_attempt` empty across both windows — six of the
+model's eleven inputs replaced by training-set means on every projection. The
+NHL API is still used for rosters and ice time, neither of which the model
+consumes. Opponent context comes from the same team snapshot the training
+matrix uses, so the two agree on what `opp_sf_pct_l20` means.
+
+**Where the player rows come from.** The spine is the NHL API boxscore
+(`ingestion/boxscore.py`), one row per dressed skater per game. The earlier
+source was MoneyPuck's shot files, which contain only players who generated a
+shot event — a skater held to zero attempts recorded no `0`, he simply
+vanished. That left 30.7 rows per game against 36 dressed skaters, and
+`min(shot_attempts) == 1` across all 200k rows, so every rolling average was
+computed over a survivor set and biased high. The boxscore has all 36 with
+`sog` present and zero where earned; MoneyPuck is now left-joined onto it for
+xG only. 247,513 skater-games, up from 200,656, across 6,877 games rather than
+6,526 — 19.3% of skater-games were previously invisible.
+
+Scratches are dropped when the lineup is filed, roughly an hour before puck
+drop. Run earlier and the NHL publishes an empty list, which means "not filed
+yet" rather than "nobody is out" — the run says which it saw.
 
 Projections are subject to the same coverage guard as game predictions.
 
@@ -231,16 +246,25 @@ climatology, alongside accuracy against the majority class:
 
 | Line | Brier | no-skill | skill | Accuracy | majority |
 |-----:|------:|---------:|------:|---------:|---------:|
-| 1.5  | 0.2277 | 0.2502 |  9.0% | 62.4% | 52.9% |
-| 2.5  | 0.1787 | 0.2013 | 11.2% | 74.1% | 72.2% |
-| 3.5  | 0.1038 | 0.1159 | 10.4% | 86.7% | 86.7% |
+| 1.5  | 0.2153 | 0.2480 | 13.2% | 66.2% | 55.0% |
+| 2.5  | 0.1570 | 0.1819 | 13.7% | 77.7% | 76.2% |
+| 3.5  | 0.0902 | 0.1015 | 11.1% | 88.6% | 88.6% |
 
-The accuracy column is why this matters. At a 3.5 line the model calls 86.7% of
+The accuracy column is why this matters. At a 3.5 line the model calls 88.6% of
 player-games correctly and so does a constant "under" — the headline number is
 almost entirely the base rate. The Brier columns show where the real skill is:
-9–11% better than quoting the base rate, at every line. An earlier version of
+11–14% better than quoting the base rate, at every line. An earlier version of
 this model scored over/under against `mean(y_true)` and reported it against a
 0.500 baseline, which flattered it by roughly three times.
+
+These numbers are **not** comparable to the ones this table carried before the
+boxscore spine landed. They are measured over every dressed skater rather than
+only those who shot, which is a different and easier population — the majority
+baseline moved with them (72.2% → 76.2% at 2.5). Scored on the same rows, the
+new spine is worth 0.4–0.8% Brier at every line and cuts mean bias from +0.040
+to +0.021 shots. The reason to prefer it is not the size of that gain but that
+it measures the population the model actually serves: at bet time you cannot
+know whether a skater will end up having shot.
 
 **League drift.** Combined shots per game fell from 63.2 in 2021-22 to 55.6 in
 2025-26, a 12% decline that is not a roster-size artifact. An expanding window
@@ -249,8 +273,9 @@ as the gap widened. Two corrections, both validated by walk-forward: exponential
 recency weighting on training rows (`RECENCY_HALF_LIFE_SEASONS`), and a
 multiplicative calibration fit on the most recent training season and folded
 into the log-link intercept, so the saved pickle is already corrected and
-serving needs no extra step. Mean bias fell from +0.092 to +0.051 shots, and on
-the most recent fold from +0.104 to +0.019.
+serving needs no extra step. Mean bias fell from +0.092 to +0.051 shots on the
+shooter-only data; on the full dressed lineup, with the sort-key fix below, it
+now sits at +0.021.
 
 Residual bias is concentrated in low-experience skaters — about +0.17 shots
 under 20 career games, against +0.003 over 200. Shrinking their rolling averages
@@ -296,6 +321,32 @@ finished games and so leaks nothing.
 pre-game starter endpoint, so this takes each team's most recent starter —
 right most nights, wrong on the back half of a back-to-back. Every row carries
 `starter_basis` so you can see what you are trusting.
+
+**Who is starting.** The NHL does not publish a probable starter before puck
+drop — checked rather than assumed: the pre-game boxscore carries no player
+stats at all, `right-rail` reports `scratches: []` until the lineup is filed,
+and `landing.matchup.goalieComparison` lists the tandem ranked on *last*
+season's numbers without naming a starter. The `starter` flag appears only once
+the game is live, which is after bet time.
+
+So the starter is inferred, and `goalie_starts.parquet` — 13,754 starts carrying
+the boxscore's own flag — makes it possible to score that inference:
+
+| Rule | Correct |
+|:-----|--------:|
+| whoever started last | 45.6% |
+| most common of last 3 | 55.7% |
+| most common of last 5 | 58.2% |
+| **most common of last 10** | **59.7%** |
+| most common of last 20 | 58.9% |
+| season-to-date leader | 58.5% |
+
+"Whoever started last" is worse than a coin flip because tandems alternate: the
+busiest goalie takes only 60% of his team's starts, so the previous game is
+nearly as much evidence against him going again as for it. Past ten starts the
+window drifts onto goalies since traded or sent down. Every row carries
+`starter_basis` ("7 of last 10 starts") and a `starter_confidence` share, so
+the guess is always visible as a guess.
 
 ### /yesterday — Last Night's Results
 
@@ -391,6 +442,11 @@ pytest
 # Build the feature matrix (processes raw MoneyPuck data)
 python -m pipeline.backfill
 
+# Pull the dressed lineup from the NHL boxscore API and join xG onto it.
+# ~210s for all 6,877 games; final games cache permanently, so re-running
+# only fetches what is new.
+python -m ingestion.boxscore --backfill --build --merge
+
 # Train the model
 python -m pipeline.train --model random_forest
 
@@ -443,6 +499,7 @@ NHLAnalyzer/
     context.py              # Rest, B2B, division flags
     elo.py                  # ELO rating system
     goalie_mp.py            # Goalie features from MoneyPuck
+    goalie_props.py         # Rolling goalie features for the saves prop
     special_teams.py        # Power play / penalty kill
     opponent_quality.py     # Stats vs strong/weak opponents
     player.py               # Player-level SOG features
@@ -454,21 +511,25 @@ NHLAnalyzer/
                             #   drift calibration, dispersion, honest scoring
     saves_model.py          # Goalie saves prop — negative binomial
     sog_model.py            # Shots on goal (player props) — trains and
-                            #   predicts from player_game_stats.parquet
+                            #   predicts from player_game_stats_full.parquet
     evaluate.py             # Evaluation metrics framework
     saved/                  # Serialized trained models
   pipeline/
     backfill.py             # Build historical feature matrix
     train.py                # Train and save production model
     live.py                 # Generate live predictions
-    props_live.py           # Player prop predictions
+    props_live.py           # Player prop predictions (drops scratches)
+    saves_live.py           # Goalie saves predictions
     daily.py                # One-command daily pipeline (refresh + score + predict)
     evaluate_history.py     # Backfill prediction outcomes
   bot/
     discord_bot.py          # Discord webhook + slash commands
   ingestion/
+    boxscore.py             # NHL boxscore API — the dressed lineup, goalie
+                            #   starter flags, and tonight's scratches
     moneypuck.py            # MoneyPuck data downloader
     nhl_api.py              # NHL Stats API client
+    player_stats.py         # MoneyPuck shot aggregation + player game logs
     odds_api.py             # Odds API client
   tests/                    # Pytest suite (synthetic data, no network/DB)
   docs/
