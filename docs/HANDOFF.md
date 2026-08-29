@@ -6,8 +6,10 @@ Written for whoever picks this up next, human or agent.
 was written before any of it had touched real data — see
 [Verified vs. not](#verified-vs-not).
 
-**Session 2** ([below](#session-2--props-overhaul-29-august-2026)) was all run
-against real data. Three commits on `main`, unpushed, 224 tests passing.
+**Session 2** ([below](#session-2--props-overhaul-29-august-2026)) and
+**Session 3** ([below](#session-3--the-boxscore-spine-29-august-2026)) were
+both run against real data. Seven commits on `main`, unpushed, 264 tests
+passing.
 
 ---
 
@@ -460,6 +462,8 @@ moneyline, at 1.089.
 
 ## Open items after Session 2
 
+*(Re-ranked and mostly resolved under [Open items after Session 3](#open-items-after-session-3).)*
+
 Ordered by what would change the numbers most.
 
 ### Zero-shot games are missing entirely
@@ -536,3 +540,182 @@ Automating the daily run is undecided (PC vs Pi). `pipeline.daily` is already
 one command, so either is a single cron line; what is missing is a lockfile,
 failure notification through the existing webhook, and retry on the MoneyPuck
 download.
+
+
+---
+
+# Session 3 — the boxscore spine, 29 August 2026
+
+Four commits on `main`, unpushed (seven total now). 264 tests passing (was
+224). All run against real data.
+
+Prompted by two repos: `Zmalski/NHL-API-Reference`, which documents endpoints
+we were not using, and `peruukki/nhl-score-api`. The first was worth acting on;
+the second wraps the same host we already call and adds nothing but a
+dependency — useful only as a reference parser for the payload shapes.
+
+## 12. The dressed lineup, not the shooters
+
+`player_game_stats.parquet` came from MoneyPuck's shot files, which contain
+only players who generated a shot event. A skater held to zero attempts
+recorded no `0` — he vanished from the game. 30.7 rows per game against 36
+dressed skaters, `min(shot_attempts) == 1` across all 200k rows.
+
+`/gamecenter/{id}/boxscore` returns all 36 with `sog` present and zero where
+earned, so it is now the spine and MoneyPuck contributes xG only. A skater who
+does not match took no attempts: `xg` and `shot_attempts` are 0, a real
+measurement. `xg_per_attempt` stays NaN — a rate is undefined with no
+attempts, and the rolling means skip NaN, so a no-attempt game contributes a 0
+to the SOG rate and nothing to shot quality.
+
+    247,513 skater-games, up from 200,656            (+23%)
+    6,877 games, up from 6,526 — 351 missing outright
+    47,891 rows (19.3%) previously invisible
+
+**The measured gain is much smaller than that row count suggests, and the
+comparison is easy to get wrong.** Scored on the population the pipeline
+actually serves — every dressed skater, target from the official boxscore,
+with the old shooter-only history emulated on the same rows:
+
+| Line | old Brier | new Brier | |
+|-----:|----------:|----------:|---:|
+| 1.5 | 0.2171 | 0.2155 | +0.78% |
+| 2.5 | 0.1579 | 0.1570 | +0.54% |
+| 3.5 | 0.0907 | 0.0903 | +0.41% |
+
+Mean bias +0.040 → +0.030 shots. The added games are mostly easy unders, so
+they move the base rate more than the skill.
+
+**Do not use the intersection comparison.** Scoring both models only on
+player-games present in the MoneyPuck file selects rows by whether the player
+shot, which is the outcome — unknowable at bet time. On that biased subset the
+new model looks *worse* (bias −0.197), purely because it is trained on a
+population with a lower mean and evaluated on one selected for having shot.
+This is the same class of error as Session 2's SOG baseline.
+
+Likewise the README's SOG table is not comparable across the change: the new
+numbers cover every dressed skater, and the majority baseline moved with them
+(72.2% → 76.2% at 2.5).
+
+The boxscore also carries per-skater `points`, `assists`, `toi`, `shifts`,
+`hits`, `blockedShots`, and a `starter` flag per goalie.
+
+## 13. Playoff games were sorting into the middle of the regular season
+
+An NHL game ID is `SSSSTTNNNN`. Thirteen call sites derived a chronological key
+as `game_id.str[-4:]`, dropping the game type — so `2024020311` and
+`2024030311` both gave 311. Playoff games sorted as though they happened in
+January, and every rolling feature keyed on that order saw a player's playoff
+results while computing features for his *earlier* regular-season games.
+
+That is leakage, not mis-ordering. All five matrices include playoffs — 351 of
+6,877 games, affecting 643 of 1,471 skaters.
+
+`config.season.game_number` takes `TTNNNN` instead: type order survives
+(20311 < 30311), still a plain int, drop-in at all thirteen sites. A test
+asserts no module derives the key by hand again.
+
+SOG mean bias +0.030 → +0.021; Brier unchanged at every line, which is what a
+4.6%-of-games leak should look like.
+
+## 14. The starter rule was worse than a coin flip
+
+`goalie_starts.parquet` — 13,754 starts carrying the boxscore's own flag —
+made it possible to score the probable-starter inference for the first time.
+
+| Rule | Correct |
+|:--|--:|
+| whoever started last (what we shipped) | 45.6% |
+| most common of last 3 | 55.7% |
+| most common of last 5 | 58.2% |
+| **most common of last 10** | **59.7%** |
+| most common of last 20 | 58.9% |
+| season-to-date leader | 58.5% |
+
+Tandems alternate: the busiest goalie takes only 60.2% of his team's starts, so
+the previous game is nearly as much evidence *against* him going again as for
+it. Past ten starts the window drifts onto goalies since traded or sent down.
+
+`starter_basis` now reports the count ("7 of last 10 starts") with a
+`starter_confidence` share.
+
+**A confirmed pre-game starter does not exist in the NHL API.** Checked against
+a real scheduled game (`2026020053`, `gameState=FUT`), not assumed:
+
+- the pre-game `boxscore` has no `playerByGameStats` at all
+- `right-rail` → `gameInfo.scratches` is `[]` until the lineup is filed
+- `landing` → `matchup.goalieComparison` lists exactly 2 goalies per team, but
+  ranked on *last* season's stats — the tandem, not a starter call
+
+The `starter` flag appears only once the game is live, i.e. after bet time.
+
+## 15. Scratches
+
+Scratches *do* publish, roughly an hour before puck drop, so `props_live` now
+drops them. A team roster is everyone under contract, so without this the model
+posted lines on healthy scratches, injured players and anyone in the minors.
+
+An empty response means "not filed yet", never "nobody is out". The run logs
+which of the two it saw rather than silently treating an unfiled lineup as a
+clean one.
+
+## Open items after Session 3
+
+Carried forward and re-ranked. Everything under Session 2's list that is not
+repeated here is done.
+
+### Points and assists props
+
+The boxscore now carries them per skater with true zeros, and `count_model`
+already has the Poisson/NB machinery. This is the cheapest new market left.
+Assists are the more interesting of the two — heavily overdispersed, so expect
+the negative binomial to matter the way it did for saves.
+
+### Game totals
+
+Still the best idea not yet built: a *main* market, where the vig is a fraction
+of what props carry, so a small edge survives. Mean 6.03 goals, P(over 5.5) =
+0.541, and the team matrix already carries xGF/xGA. Use `count_model`; expect
+the same league drift.
+
+### The saves model still trains on MoneyPuck goalie data
+
+`goalie_starts.parquet` has official saves and shots-against for every goalie
+appearance, including relievers, and a real starter flag. `features/goalie_mp.py`
+predates it. Switching would also remove a source disagreement — the boxscore
+and MoneyPuck differ on SOG in 0.82% of skater-games.
+
+### Confirming the tandem
+
+`landing.matchup.goalieComparison` names the two goalies a team is actually
+carrying tonight. Intersecting that with the last-10 rule would catch injuries
+and callups, which no historical rule can. Cheap; untested because it needs a
+live slate.
+
+### `--dry-run` still writes the prediction log
+
+`pipeline/live.py:792` — `dry_run` guards only the Postgres save;
+`save_prediction_history` runs unconditionally. Known for three sessions now.
+Two-line fix.
+
+### Season-boundary skew in three snapshots
+
+`_build_goalie_snapshot`, `_build_special_teams_snapshot` and
+`_build_opponent_quality_snapshot` still take `.iloc[-1]` across every season.
+`_build_team_snapshot` was fixed in Session 1, so the pipeline is inconsistent
+about whether snapshots reset at the boundary. Worth making uniform before
+opening night, which is when it bites.
+
+### Smaller
+
+- **`/edge`** — offered twice, still not built. Build it before opening night
+  so it logs disagreements from game one.
+- **287 features on 6,877 games.** `run_feature_selection` exists but
+  production RF ignores it; top-20 previously improved Brier 0.2416 → 0.2404.
+- **NHL Edge endpoints** (skating speed, shot speed, zone time) are the only
+  untapped *feature* source found — MoneyPuck has none of it. Speculative.
+- **`ingestion/odds_api.py` is dead code**, superseded by `action_network.py`.
+- `pipeline/daily.py` imports `sys` and never uses it.
+- Automating the daily run is still undecided (PC vs Pi). `pipeline.daily` is
+  one command; what is missing is a lockfile, failure notification through the
+  existing webhook, and retry on the MoneyPuck download.
