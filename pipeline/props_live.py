@@ -31,9 +31,11 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import httpx
 import pandas as pd
 from dotenv import load_dotenv
 
+from ingestion.boxscore import fetch_scratches
 from ingestion.nhl_api import fetch_schedule
 from ingestion.player_stats import (
     fetch_team_roster, fetch_player_game_log, toi_to_seconds,
@@ -138,6 +140,22 @@ def _load_opponent_snapshot() -> pd.DataFrame:
 # Main pipeline
 # ---------------------------------------------------------------------------
 
+def scratched_players(games: list[dict]) -> set[int]:
+    """Player IDs scratched across tonight's games.
+
+    Returns an empty set when no lineup has been filed yet, which is the
+    common case for an early-afternoon run.  Callers should treat empty as
+    "not published" rather than "nobody is scratched".
+    """
+    scratched: set[int] = set()
+    with httpx.Client(timeout=15.0) as client:
+        for g in games:
+            by_side = fetch_scratches(g["game_id"], client=client)
+            for ids in by_side.values():
+                scratched.update(int(i) for i in ids)
+    return scratched
+
+
 def run(
     target_date: Optional[date] = None,
     min_sog: float = 1.5,
@@ -220,12 +238,35 @@ def run(
         logger.warning("No rosters fetched — check API connectivity")
         return pd.DataFrame()
 
+    # 4b. Drop tonight's scratches.  A team roster is everyone under contract,
+    #     so without this the projections include healthy scratches, injured
+    #     players and anyone in the minors — a line on a player who will not
+    #     dress.  The NHL fills gameInfo.scratches when the lineup is filed,
+    #     roughly an hour before puck drop; run earlier and it is empty, which
+    #     is why the count is logged rather than assumed.
+    scratched = scratched_players(reg_games)
+    if scratched:
+        before = len(roster_by_player)
+        roster_by_player = {
+            pid: row for pid, row in roster_by_player.items() if pid not in scratched
+        }
+        logger.info(
+            "Scratches: dropped %d of %d skaters", before - len(roster_by_player), before,
+        )
+    else:
+        logger.info(
+            "No scratches published yet — lineups are usually filed about an "
+            "hour before puck drop, so projections may include players who "
+            "will not dress",
+        )
+
     # 5. Model features from player_game_stats.parquet — the source the SOG
     #    model was trained on.  The NHL API game log does not expose xGoal, so
     #    building features from it left xg / shot_attempts / xg_per_attempt
     #    permanently NaN: six of the model's eleven inputs silently replaced
     #    by training-set means on every projection.
-    stats_path = PARQUET_DIR / "player_game_stats.parquet"
+    from ingestion.player_stats import player_game_stats_path
+    stats_path = player_game_stats_path()
     if not stats_path.exists():
         logger.error(
             "No %s — run `python -m pipeline.backfill` to build it. "

@@ -290,10 +290,40 @@ class TestServingGuards:
         assert saves_live.MIN_FEATURE_COVERAGE == live.MIN_FEATURE_COVERAGE
         assert saves_live.MIN_FEATURE_COVERAGE == props_live.MIN_FEATURE_COVERAGE
 
-    def test_probable_starter_is_the_most_recent_one(self, goalie_history):
+    def test_probable_starter_is_the_teams_recent_workhorse(self, goalie_history):
+        """Not "whoever started last" -- that rule is right 45.6% of the time
+        against the boxscore starter flag, because tandems alternate.  The
+        busiest of the last STARTER_WINDOW starts scores 59.7%."""
         starters = saves_live.probable_starters(goalie_history, ["BOS"])
         assert starters["BOS"]["goalie_id"] == 8476883
-        assert starters["BOS"]["starter_basis"] == "last start"
+        assert "of last" in starters["BOS"]["starter_basis"]
+        assert 0.0 < starters["BOS"]["starter_confidence"] <= 1.0
+
+    def test_the_backup_who_started_last_night_does_not_take_over(self):
+        """The regression the old rule had: one spot start by the backup made
+        him the projected starter for the team's next game."""
+        rows = [
+            {"team": "BOS", "season": "2025-2026", "game_num": 20000 + i,
+             "goalie_id": 8476883, "goalie_name": "Starter"}
+            for i in range(9)
+        ]
+        rows.append({"team": "BOS", "season": "2025-2026", "game_num": 20009,
+                     "goalie_id": 8999999, "goalie_name": "Backup"})
+        hist = pd.DataFrame(rows)
+        picked = saves_live.probable_starters(hist, ["BOS"])["BOS"]
+        assert picked["goalie_id"] == 8476883
+        assert picked["starter_confidence"] == 0.9
+
+    def test_a_genuine_change_of_starter_is_picked_up(self):
+        """It must still follow a real handover, not anchor on a traded goalie."""
+        rows = [
+            {"team": "BOS", "season": "2025-2026", "game_num": 20000 + i,
+             "goalie_id": 8476883 if i < 3 else 8999999,
+             "goalie_name": "Old" if i < 3 else "New"}
+            for i in range(10)
+        ]
+        picked = saves_live.probable_starters(pd.DataFrame(rows), ["BOS"])["BOS"]
+        assert picked["goalie_id"] == 8999999
 
     def test_a_team_with_no_history_is_skipped_not_guessed(self, goalie_history):
         assert saves_live.probable_starters(goalie_history, ["VGK"]) == {}
