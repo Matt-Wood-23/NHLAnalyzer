@@ -28,7 +28,7 @@ from typing import Optional
 import pandas as pd
 import httpx
 
-from config.season import current_season_api, moneypuck_seasons
+from config.season import current_season_api, moneypuck_seasons, game_number
 
 logger = logging.getLogger(__name__)
 
@@ -135,8 +135,8 @@ def aggregate_shots_to_player_games(
         "playerPositionThatDidEvent": "position",
     })
 
-    # Sort chronologically: game_id last 4 digits = game number within season
-    agg["game_num"] = agg["game_id"].str[-4:].astype(int)
+    # Sort chronologically within the season, playoffs after regular season
+    agg["game_num"] = game_number(agg["game_id"])
     agg = agg.sort_values(["player_id", "season", "game_num"]).reset_index(drop=True)
     agg["sog"] = agg["sog"].fillna(0).astype(int)
 
@@ -155,10 +155,26 @@ def save_player_game_stats(df: pd.DataFrame, name: str = "player_game_stats") ->
     return path
 
 
+def player_game_stats_path() -> Path:
+    """Where player-game rows come from, preferring the full dressed lineup.
+
+    ``player_game_stats_full.parquet`` is the boxscore spine from
+    ``ingestion.boxscore`` — every dressed skater, with a real 0 for the 19.3%
+    of skater-games MoneyPuck drops because the player took no shot attempt.
+    ``player_game_stats.parquet`` is that shooter-only aggregation, kept as a
+    fallback so a checkout without the boxscore cache still runs.
+
+    Resolved at call time rather than import time so a backfill mid-session
+    takes effect without a restart.
+    """
+    full = PARQUET_DIR / "player_game_stats_full.parquet"
+    if full.exists():
+        return full
+    return PARQUET_DIR / "player_game_stats.parquet"
+
+
 def load_player_game_stats(path: Optional[Path] = None) -> pd.DataFrame:
-    if path is None:
-        path = PARQUET_DIR / "player_game_stats.parquet"
-    return pd.read_parquet(path)
+    return pd.read_parquet(path or player_game_stats_path())
 
 
 # ---------------------------------------------------------------------------

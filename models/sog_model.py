@@ -113,7 +113,8 @@ def load_training_data(
     Returns one row per (game_id, player_id) with SOG as target.
     """
     if player_parquet is None:
-        player_parquet = PARQUET_DIR / "player_game_stats.parquet"
+        from ingestion.player_stats import player_game_stats_path
+        player_parquet = player_game_stats_path()
     if team_parquet is None:
         team_parquet = PARQUET_DIR / "moneypuck_team_game_stats.parquet"
 
