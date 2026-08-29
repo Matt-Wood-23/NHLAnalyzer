@@ -43,6 +43,7 @@ SEASON_STARTS: dict[int, str] = {
     2023: "2023-10-10",
     2024: "2024-10-08",
     2025: "2025-10-08",
+    2026: "2026-10-05",   # confirmed against the NHL schedule API, not estimated
 }
 
 # A new season is considered "current" from this month onward, so pre-season
