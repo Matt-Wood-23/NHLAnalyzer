@@ -224,6 +224,40 @@ the training matrix uses, so the two agree on what `opp_sf_pct_l20` means.
 
 Projections are subject to the same coverage guard as game predictions.
 
+**How the model is scored.** At the half-integer lines books actually post,
+against the baselines those lines really have — not a coin flip. `evaluate_sog`
+turns the Poisson rate into P(SOG > line) and scores it with Brier against
+climatology, alongside accuracy against the majority class:
+
+| Line | Brier | no-skill | skill | Accuracy | majority |
+|-----:|------:|---------:|------:|---------:|---------:|
+| 1.5  | 0.2277 | 0.2502 |  9.0% | 62.4% | 52.9% |
+| 2.5  | 0.1787 | 0.2013 | 11.2% | 74.1% | 72.2% |
+| 3.5  | 0.1038 | 0.1159 | 10.4% | 86.7% | 86.7% |
+
+The accuracy column is why this matters. At a 3.5 line the model calls 86.7% of
+player-games correctly and so does a constant "under" — the headline number is
+almost entirely the base rate. The Brier columns show where the real skill is:
+9–11% better than quoting the base rate, at every line. An earlier version of
+this model scored over/under against `mean(y_true)` and reported it against a
+0.500 baseline, which flattered it by roughly three times.
+
+**League drift.** Combined shots per game fell from 63.2 in 2021-22 to 55.6 in
+2025-26, a 12% decline that is not a roster-size artifact. An expanding window
+trained on the high-volume seasons over-projected every fold, and the error grew
+as the gap widened. Two corrections, both validated by walk-forward: exponential
+recency weighting on training rows (`RECENCY_HALF_LIFE_SEASONS`), and a
+multiplicative calibration fit on the most recent training season and folded
+into the log-link intercept, so the saved pickle is already corrected and
+serving needs no extra step. Mean bias fell from +0.092 to +0.051 shots, and on
+the most recent fold from +0.104 to +0.019.
+
+Residual bias is concentrated in low-experience skaters — about +0.17 shots
+under 20 career games, against +0.003 over 200. Shrinking their rolling averages
+toward the league mean makes it worse, because fringe players are below average
+and the prior pulls them up. Treat projections for skaters under ~20 games as
+biased high.
+
 ![SOG props command](sogprediction.png)
 
 ### Other Commands

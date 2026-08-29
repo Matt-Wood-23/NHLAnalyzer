@@ -16,6 +16,34 @@ Since we lack historical TOI data, shot_attempts_l10/l20 acts as a proxy
 (more attempts ≈ more ice time). When TOI becomes available via API, it can
 be added directly.
 
+Scoring:
+  Projections are scored at the half-integer lines books actually post
+  (1.5 / 2.5 / 3.5), not against ``mean(y_true)``.  The old metric asked
+  "did he beat ~2.0 shots", whose honest baseline is the majority class
+  (72% "under" at 2.5), not the 0.500 coin flip it was reported against.
+  Because this is a Poisson model, ``over_probability`` turns the projected
+  rate into P(SOG > line), which is both the number a bet needs and a
+  quantity Brier can score against climatology.
+
+League drift:
+  Combined shots per game fell from 63.2 in 2021-22 to 55.6 in 2025-26.
+  An expanding window trained on the high-volume seasons over-projected
+  every fold, and the error grew as the gap widened (+0.065 shots in
+  2022-23 to +0.120 in 2024-25).  Two corrections, both validated by
+  walk-forward: exponential recency weighting on training rows, and a
+  multiplicative calibration fit on the most recent training season.
+  Together they cut mean bias from +0.092 to +0.052 shots.
+
+Known limitation:
+  The residual bias is concentrated in low-experience players — roughly
+  +0.17 shots for skaters under 20 career games, against +0.003 for those
+  over 200.  Their rolling averages are noisy and the model cannot tell a
+  6-game rookie averaging 2.0 from an established 2.0 shooter.  Shrinking
+  toward the league mean makes it worse (fringe players are below average,
+  so the prior pulls them further up); adding log(games_played) halves the
+  low-experience bias but degrades every other metric.  Treat projections
+  for skaters under ~20 games as biased high.
+
 Usage:
     python -m models.sog_model               # train + evaluate
     python -m models.sog_model --save        # train + save to models/saved/
@@ -34,6 +62,7 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import PoissonRegressor
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
+from scipy.stats import poisson
 
 from config.season import all_seasons
 
@@ -58,6 +87,15 @@ SOG_FEATURE_COLS = [
 
 # Only skaters with at least this many games are included
 MIN_GAMES_FILTER = 5
+
+# Lines books actually post for shots on goal.  Half-integers, so there is
+# no push and P(over) = P(SOG >= ceil(line)).
+OU_LINES = [1.5, 2.5, 3.5]
+
+# Exponential decay applied to training rows by season age, in seasons.
+# 0.5 means a season-old row carries 1/4 the weight of a current one.
+# Tuned by walk-forward against projection bias; see module docstring.
+RECENCY_HALF_LIFE_SEASONS = 0.5
 
 # Exclude goalies and players with very rare appearances
 _SKIP_POSITIONS = {"G", ""}
@@ -139,19 +177,136 @@ def build_pipeline() -> Pipeline:
     ])
 
 
-def evaluate_sog(y_true: np.ndarray, y_pred: np.ndarray) -> dict:
-    """Compute MAE, RMSE, and over/under accuracy at line = mean(y_true)."""
+def season_sample_weights(
+    seasons: pd.Series,
+    ordered_seasons: list[str],
+    half_life: float = RECENCY_HALF_LIFE_SEASONS,
+) -> np.ndarray:
+    """Exponential recency weights for training rows, by season age.
+
+    The most recent training season gets weight 1.0 and each season back
+    halves every ``half_life`` seasons.  This is the first of the two drift
+    corrections: it stops five-year-old, high-volume seasons from setting
+    the intercept for a league that now shoots 12% less.
+    """
+    if half_life is None or half_life <= 0:
+        return np.ones(len(seasons), dtype=float)
+    newest = len(ordered_seasons) - 1
+    age = seasons.map({s: newest - i for i, s in enumerate(ordered_seasons)})
+    return (0.5 ** (age.to_numpy(dtype=float) / half_life))
+
+
+def over_probability(mu: np.ndarray, line: float) -> np.ndarray:
+    """P(SOG > line) for a Poisson rate ``mu`` at a half-integer ``line``.
+
+    Lines are half-integers, so "over 2.5" means 3 or more shots and there
+    is no push to handle: P = 1 - CDF(floor(line)).
+    """
+    return 1.0 - poisson.cdf(np.floor(line), mu)
+
+
+def _calibration_factor(
+    pipeline: Pipeline,
+    train: pd.DataFrame,
+    feature_cols: list[str],
+) -> float:
+    """Multiplicative correction so the fit matches the most recent season.
+
+    The second drift correction.  A Poisson MLE reproduces the mean of the
+    *whole* training set, which straddles seasons of different shot volume.
+    Comparing predicted to actual on the newest training season alone
+    recovers how far the fit sits above where the league now is.
+    """
+    newest = sorted(train["season"].unique())[-1]
+    recent = train[train["season"] == newest]
+    predicted = pipeline.predict(recent[feature_cols].values).mean()
+    if not np.isfinite(predicted) or predicted <= 0:
+        logger.warning("Calibration skipped: non-positive mean prediction")
+        return 1.0
+    factor = float(recent["sog"].mean() / predicted)
+    logger.info("Calibration on %s: x%.4f", newest, factor)
+    return factor
+
+
+def _apply_calibration(pipeline: Pipeline, factor: float) -> Pipeline:
+    """Fold the calibration factor into the model's intercept, in place.
+
+    The link is log, so ``exp(b0 + log(f) + bx) == f * exp(b0 + bx)``: the
+    correction is exact as an intercept shift.  Doing it here rather than at
+    the call site means the saved pickle is already calibrated and every
+    consumer (``pipeline.props_live``) gets it with no change.
+    """
+    if factor != 1.0 and np.isfinite(factor) and factor > 0:
+        pipeline.named_steps["model"].intercept_ += float(np.log(factor))
+    return pipeline
+
+
+def fit_pipeline(
+    train: pd.DataFrame,
+    feature_cols: list[str],
+    half_life: float = RECENCY_HALF_LIFE_SEASONS,
+    calibrate: bool = True,
+) -> Pipeline:
+    """Fit a recency-weighted, drift-calibrated SOG model on ``train``."""
+    ordered = sorted(train["season"].unique())
+    weights = season_sample_weights(train["season"], ordered, half_life)
+
+    pipeline = build_pipeline()
+    pipeline.fit(
+        train[feature_cols].values,
+        train["sog"].values.astype(float),
+        model__sample_weight=weights,
+    )
+    if calibrate and len(ordered) >= 1:
+        _apply_calibration(pipeline, _calibration_factor(pipeline, train, feature_cols))
+    return pipeline
+
+
+def evaluate_sog(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    train_sog: Optional[np.ndarray] = None,
+) -> dict:
+    """Score projections at the lines books post, against honest baselines.
+
+    For each line in :data:`OU_LINES` this reports:
+      ``brier``       Brier score of the model's P(over).
+      ``brier_base``  Brier score of climatology — the training base rate,
+                      the same no-skill reference ``/history`` uses.
+      ``accuracy``    Share of correct over/under calls.
+      ``acc_base``    The majority class, which is what accuracy must beat.
+                      At 2.5 that is ~0.72, not 0.500.
+
+    Args:
+        train_sog: training targets, used for the climatological base rate.
+                   Falls back to ``y_true`` when absent, which flatters
+                   climatology slightly.
+    """
     mae  = float(np.mean(np.abs(y_true - y_pred)))
     rmse = float(np.sqrt(np.mean((y_true - y_pred) ** 2)))
 
-    # Over/under accuracy: does the model correctly call over/under relative to
-    # the actual player's season-average SOG (a rough proxy for a book line)?
-    mean_line = np.mean(y_true)
-    actual_over  = y_true  > mean_line
-    pred_over    = y_pred  > mean_line
-    ou_acc = float(np.mean(actual_over == pred_over))
+    reference = y_true if train_sog is None else train_sog
+    metrics = {
+        "mae":  mae,
+        "rmse": rmse,
+        "bias": float(np.mean(y_pred) - np.mean(y_true)),
+        "n":    len(y_true),
+        "lines": {},
+    }
 
-    return {"mae": mae, "rmse": rmse, "ou_accuracy": ou_acc, "n": len(y_true)}
+    for line in OU_LINES:
+        actual = (y_true > line).astype(float)
+        prob   = over_probability(y_pred, line)
+        rate   = float(np.mean(reference > line))
+        metrics["lines"][line] = {
+            "brier":      float(np.mean((prob - actual) ** 2)),
+            "brier_base": float(np.mean((rate - actual) ** 2)),
+            "accuracy":   float(np.mean((prob > 0.5) == (actual == 1))),
+            "acc_base":   float(max(actual.mean(), 1 - actual.mean())),
+            "over_rate":  float(actual.mean()),
+        }
+
+    return metrics
 
 
 def run_walk_forward(df: pd.DataFrame) -> list[dict]:
@@ -171,16 +326,13 @@ def run_walk_forward(df: pd.DataFrame) -> list[dict]:
             logger.warning("Fold %d: insufficient data, skipping", fold_idx)
             continue
 
-        X_train = train[feature_cols].values
         y_train = train["sog"].values.astype(float)
-        X_test  = test[feature_cols].values
         y_test  = test["sog"].values.astype(float)
 
-        pipeline = build_pipeline()
-        pipeline.fit(X_train, y_train)
-        y_pred = pipeline.predict(X_test)
+        pipeline = fit_pipeline(train, feature_cols)
+        y_pred = pipeline.predict(test[feature_cols].values)
 
-        metrics = evaluate_sog(y_test, y_pred)
+        metrics = evaluate_sog(y_test, y_pred, train_sog=y_train)
         metrics.update({
             "fold": fold_idx,
             "train_seasons": train_seasons,
@@ -190,23 +342,23 @@ def run_walk_forward(df: pd.DataFrame) -> list[dict]:
         results.append(metrics)
 
         logger.info(
-            "Fold %d | test %s | MAE=%.3f RMSE=%.3f O/U acc=%.3f (n=%d)",
-            fold_idx, test_season,
-            metrics["mae"], metrics["rmse"], metrics["ou_accuracy"], metrics["n"],
+            "Fold %d | test %s | MAE=%.3f bias=%+.3f Brier@2.5=%.4f (n=%d)",
+            fold_idx, test_season, metrics["mae"], metrics["bias"],
+            metrics["lines"][2.5]["brier"], metrics["n"],
         )
 
     return results
 
 
 def train_final_model(df: pd.DataFrame) -> tuple[Pipeline, list[str]]:
-    """Train on all available data. Returns (pipeline, feature_cols)."""
-    feature_cols = [c for c in SOG_FEATURE_COLS if c in df.columns]
-    X = df[feature_cols].values
-    y = df["sog"].values.astype(float)
+    """Train on all available data. Returns (pipeline, feature_cols).
 
-    pipeline = build_pipeline()
-    pipeline.fit(X, y)
-    logger.info("Final model trained on %d player-game rows", len(y))
+    Recency-weighted and drift-calibrated exactly as the walk-forward folds
+    are, so the saved model behaves the way validation said it would.
+    """
+    feature_cols = [c for c in SOG_FEATURE_COLS if c in df.columns]
+    pipeline = fit_pipeline(df, feature_cols)
+    logger.info("Final model trained on %d player-game rows", len(df))
     return pipeline, feature_cols
 
 
@@ -251,17 +403,40 @@ if __name__ == "__main__":
 
     if results:
         print("\n=== Walk-Forward Results ===")
-        print(f"{'Fold':<6} {'Test Season':<12} {'MAE':>6} {'RMSE':>7} {'O/U Acc':>9} {'N':>6}")
+        print(f"{'Fold':<6} {'Test Season':<12} {'MAE':>6} {'RMSE':>7} {'Bias':>7} {'N':>7}")
         print("-" * 48)
         for r in results:
             print(
                 f"{r['fold']:<6} {r['test_season']:<12} "
-                f"{r['mae']:>6.3f} {r['rmse']:>7.3f} {r['ou_accuracy']:>9.3f} {r['n']:>6}"
+                f"{r['mae']:>6.3f} {r['rmse']:>7.3f} {r['bias']:>+7.3f} {r['n']:>7}"
             )
-        avg_mae = np.mean([r["mae"] for r in results])
-        avg_ou  = np.mean([r["ou_accuracy"] for r in results])
-        print(f"\nAvg MAE: {avg_mae:.3f}  |  Avg O/U Accuracy: {avg_ou:.3f}")
-        print("(Naive O/U baseline = 0.500)")
+        print(
+            f"\nAvg MAE: {np.mean([r['mae'] for r in results]):.3f}   "
+            f"Avg bias: {np.mean([r['bias'] for r in results]):+.3f} shots"
+        )
+
+        print("\n=== Over/Under by Line ===")
+        print("Brier scores P(over) against climatology; accuracy against the")
+        print("majority class, which is the baseline a coin flip is not.")
+        print()
+        print(f"{'Line':>5} {'Brier':>8} {'no-skill':>9} {'skill':>7} "
+              f"{'Acc':>7} {'majority':>9} {'Over%':>7}")
+        print("-" * 58)
+        for line in OU_LINES:
+            per = [r["lines"][line] for r in results]
+            brier = np.mean([x["brier"] for x in per])
+            base  = np.mean([x["brier_base"] for x in per])
+            acc   = np.mean([x["accuracy"] for x in per])
+            amaj  = np.mean([x["acc_base"] for x in per])
+            over  = np.mean([x["over_rate"] for x in per])
+            skill = 1 - brier / base if base else float("nan")
+            print(
+                f"{line:>5.1f} {brier:>8.4f} {base:>9.4f} {skill:>6.1%} "
+                f"{acc:>7.1%} {amaj:>9.1%} {over:>7.1%}"
+            )
+        print("\nBrier skill > 0 means the projections beat always quoting the")
+        print("base rate. Accuracy below the majority column means a constant")
+        print("'under' would have called more games correctly.")
 
     if args.save:
         pipeline, feature_cols = train_final_model(df)
