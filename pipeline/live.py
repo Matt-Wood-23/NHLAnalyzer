@@ -620,14 +620,27 @@ def attach_market_prices(predictions: pd.DataFrame, target_date: date) -> pd.Dat
 # Save prediction history (Parquet — always works, no DB needed)
 # ---------------------------------------------------------------------------
 
-def save_prediction_history(predictions: pd.DataFrame, model_name: str) -> Path:
-    """Append today's predictions to a Parquet-based history log."""
+def save_prediction_history(
+    predictions: pd.DataFrame,
+    model_name: str,
+    target_date: Optional[date] = None,
+) -> Path:
+    """Append today's predictions to a Parquet-based history log.
+
+    ``game_date`` is stored separately from ``predicted_at`` because they are
+    not the same thing: a run that starts at 23:40 local time, or any run at
+    all once UTC has rolled over, stamps a ``predicted_at`` a day away from
+    the slate it is predicting.  Anything grouping results by night needs the
+    date of the games, not the date of the job.
+    """
     path = HISTORY_PATH
     path.parent.mkdir(parents=True, exist_ok=True)
 
     records = predictions[["game_id", "home_team", "away_team", "prob_home_win"]].copy()
     records["model_name"] = model_name
     records["predicted_at"] = datetime.now(timezone.utc).isoformat()
+    if target_date is not None:
+        records["game_date"] = target_date.isoformat()
     # Include ELO and feature coverage if available
     for col in ["home_elo", "away_elo", "feature_coverage",
                 "market_prob_home", "market_n_books"]:
@@ -773,7 +786,7 @@ def run(
     predictions = attach_market_prices(predictions, target_date)
 
     # 6. Always save prediction history (Parquet)
-    save_prediction_history(predictions, model_name)
+    save_prediction_history(predictions, model_name, target_date)
 
     # 6b. Optionally save to DB
     if not dry_run and conn is not None:

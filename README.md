@@ -297,6 +297,34 @@ pre-game starter endpoint, so this takes each team's most recent starter —
 right most nights, wrong on the back half of a back-to-back. Every row carries
 `starter_basis` so you can see what you are trusting.
 
+### /yesterday — Last Night's Results
+
+How the most recent scored slate actually did. Defaults to the last night with
+results rather than literally yesterday, because the NHL has off-days and a
+five-month offseason, and "no games" is a worse answer than the last night that
+happened.
+
+```
+🔴 Results — 2026-04-13
+0-4 · 0%
+  ✗  PIT  54%  Toss-Up
+  ✗  NYI  53%  Toss-Up
+  ✗  CBJ  52%  Toss-Up
+  ✗  OTT  51%  Toss-Up
+
+Brier 0.2769 vs no-skill 0.2500 (-0.0269)
+No Strong Picks missed — every miss was a Lean or a Toss-Up, close to noise.
+```
+
+The per-game breakdown leads, and the last line is the reason. A losing night
+where every miss was a coin flip is close to noise; the same record with three
+Strong Picks down is the night worth investigating, and the tally alone cannot
+tell them apart.
+
+Same data in the terminal via `python -m pipeline.evaluate_history --day`, and
+posted automatically with `--results` in webhook mode — which closes the daily
+loop: predictions in the morning, results the next.
+
 ### Other Commands
 
 - **/elo** — Current ELO rankings for all 32 teams
@@ -376,13 +404,16 @@ python -m pipeline.live --dry-run
 python -m pipeline.live --date 2026-03-15 --dry-run
 
 # Post predictions to Discord
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... python -m bot.discord_bot --webhook --props --saves
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... python -m bot.discord_bot --webhook --props --saves --results
 
-# Run the Discord bot (slash commands: /predictions, /props, /saves, /elo, /history)
+# Run the Discord bot (slash commands: /predictions, /props, /saves, /yesterday, /elo, /history)
 DISCORD_BOT_TOKEN=... python -m bot.discord_bot --bot
 
 # Evaluate prediction accuracy over time
 python -m pipeline.evaluate_history
+
+# Report on one night's picks (bare --day uses the last scored slate)
+python -m pipeline.evaluate_history --day
 
 # Tune ELO parameters and persist them for the pipelines to use
 python -m features.elo

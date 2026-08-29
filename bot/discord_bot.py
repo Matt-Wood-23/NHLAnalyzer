@@ -7,7 +7,7 @@ Two modes:
        Requires: DISCORD_WEBHOOK_URL env var.
 
   2. Bot mode (persistent, slash commands):
-       Full py-cord bot with /predictions, /props and /saves commands.
+       Full py-cord bot with /predictions, /props, /saves and /yesterday commands.
        Requires: DISCORD_BOT_TOKEN env var.
 
 Usage:
@@ -15,7 +15,7 @@ Usage:
     python -m bot.discord_bot --webhook
 
     # One-shot webhook post with props too
-    python -m bot.discord_bot --webhook --props --saves
+    python -m bot.discord_bot --webhook --props --saves --results
 
     # One-shot webhook post for a specific date
     python -m bot.discord_bot --webhook --date 2026-03-10
@@ -522,6 +522,107 @@ def format_elo_embeds(top_n: int = 32) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Embed builders — one night's results
+# ---------------------------------------------------------------------------
+
+def format_day_embed(report: dict) -> dict:
+    """Build an embed for a single night of results.
+
+    Leads with the per-game breakdown rather than the record, because the
+    tally on its own is not readable. Going 2-5 on a night where every miss
+    was a Toss-Up is close to noise; going 2-5 with three Strong Picks down
+    is the night worth looking at, and only the breakdown separates them.
+    """
+    if not report or not report.get("date"):
+        return {
+            "title": "No results yet",
+            "description": (
+                "Nothing has been scored. Predictions are logged when "
+                "`pipeline.live` runs and scored once the games finish."
+            ),
+            "color": _COLOR_HIST,
+        }
+
+    if not report.get("n"):
+        logged = report.get("n_logged", 0)
+        return {
+            "title": f"Results — {report['date']}",
+            "description": (
+                f"{logged} prediction(s) logged for this date, none scored yet."
+                if logged else "No predictions were logged for this date."
+            ),
+            "color": _COLOR_HIST,
+        }
+
+    wins, losses = report["wins"], report["losses"]
+    accuracy = report["accuracy"]
+    verdict = "🟢" if wins > losses else ("⚪" if wins == losses else "🔴")
+
+    lines = []
+    for g in report["games"]:
+        mark = "✓" if g["correct"] else "✗"
+        lines.append(
+            "`{:<3} {:>4} {:>4}  {:<11}`".format(
+                mark, g["pick"], f"{g['prob']:.0%}", g["confidence"],
+            )
+        )
+
+    fields = [{
+        "name": f"{wins}-{losses} \u00b7 {accuracy:.0%}",
+        "value": "\n".join(lines),
+        "inline": False,
+    }]
+
+    brier = report["brier"]
+    delta = report["baseline_brier"] - brier
+    fields.append({
+        "name": "Brier",
+        "value": (
+            f"`{brier:.4f}` vs no-skill `{report['baseline_brier']:.4f}`"
+            f" ({delta:+.4f})"
+        ),
+        "inline": True,
+    })
+
+    market = report.get("market") or {}
+    if market.get("n"):
+        fields.append({
+            "name": "vs closing line",
+            "value": (
+                f"model `{market['model_brier']:.4f}` \u00b7 "
+                f"market `{market['market_brier']:.4f}` "
+                f"on {market['n']} game(s)"
+            ),
+            "inline": True,
+        })
+
+    strong = report.get("strong_misses") or []
+    if strong:
+        fields.append({
+            "name": f"Strong Picks that missed ({len(strong)})",
+            "value": "\n".join(
+                f"{g['pick']} {g['prob']:.0%} over "
+                f"{g['away_team'] if g['pick'] == g['home_team'] else g['home_team']}"
+                for g in strong
+            ),
+            "inline": False,
+        })
+    elif losses:
+        fields.append({
+            "name": "No Strong Picks missed",
+            "value": "Every miss was a Lean or a Toss-Up \u2014 close to noise.",
+            "inline": False,
+        })
+
+    return {
+        "title": f"{verdict} Results \u2014 {report['date']}",
+        "color": _COLOR_HIST,
+        "fields": fields,
+        "footer": {"text": "NHL Analyzer \u2022 One night; season numbers are in /history"},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Embed builders — prediction history / accuracy
 # ---------------------------------------------------------------------------
 
@@ -735,6 +836,7 @@ def send_predictions_webhook(
     pred_date: Optional[date] = None,
     props_df=None,
     saves_df=None,
+    results_report=None,
 ) -> bool:
     """Format and post daily predictions (and optionally props) to a Discord webhook."""
     if pred_date is None:
@@ -772,6 +874,11 @@ def send_predictions_webhook(
     if saves_df is not None and len(saves_df) > 0:
         saves_embeds = format_saves_embeds(saves_df, pred_date)
         if saves_embeds and not post_webhook(webhook_url, saves_embeds):
+            return False
+
+    # Last night's results -- the reflection half of the daily loop
+    if results_report:
+        if not post_webhook(webhook_url, [format_day_embed(results_report)]):
             return False
 
     return True
@@ -937,6 +1044,29 @@ def run_bot(token: str) -> None:
             await ctx.followup.send(f"Error loading ELO rankings: {e}")
 
     @bot.slash_command(
+        name="yesterday",
+        description="How the last slate of predictions actually did",
+    )
+    async def yesterday_cmd(
+        ctx: discord.ApplicationContext,
+        date_str: discord.Option(
+            str, "Date (YYYY-MM-DD). Default: the most recent scored slate",
+            required=False, default="",
+        ),
+    ):
+        await ctx.defer()
+        try:
+            from pipeline.evaluate_history import day_report, load_history
+
+            hist = load_history()
+            target = date.fromisoformat(date_str) if date_str else None
+            embed = format_day_embed(day_report(hist, target))
+            await ctx.followup.send(embed=discord.Embed.from_dict(embed))
+        except Exception as e:
+            logger.error("yesterday_cmd error: %s", e)
+            await ctx.followup.send(f"Error loading results: {e}")
+
+    @bot.slash_command(
         name="history",
         description="Prediction accuracy vs baseline, calibration and pick strength",
     )
@@ -992,6 +1122,8 @@ if __name__ == "__main__":
                         help="Also post SOG props projections (webhook mode only)")
     parser.add_argument("--saves", action="store_true",
                         help="Also post goalie saves projections (webhook mode only)")
+    parser.add_argument("--results", action="store_true",
+                        help="Also post how the last scored slate did (webhook mode only)")
     args = parser.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -1025,8 +1157,15 @@ if __name__ == "__main__":
             logger.info("Running goalie saves pipeline...")
             saves = saves_run(target_date=target)
 
+        results = None
+        if args.results:
+            from pipeline.evaluate_history import day_report, load_history
+            logger.info("Building last-slate results...")
+            results = day_report(load_history())
+
         success = send_predictions_webhook(
-            preds, webhook_url, pred_date=target, props_df=props, saves_df=saves,
+            preds, webhook_url, pred_date=target, props_df=props,
+            saves_df=saves, results_report=results,
         )
 
         if conn:

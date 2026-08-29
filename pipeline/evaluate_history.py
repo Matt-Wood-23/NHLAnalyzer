@@ -12,10 +12,13 @@ Usage:
     python -m pipeline.evaluate_history                  # current season
     python -m pipeline.evaluate_history --season all     # every season
     python -m pipeline.evaluate_history --season 2025-2026
+    python -m pipeline.evaluate_history --day               # last slate
+    python -m pipeline.evaluate_history --day 2026-04-13
 """
 
 import argparse
 import logging
+from datetime import date
 from pathlib import Path
 
 import numpy as np
@@ -476,6 +479,147 @@ def coverage_warning(hist: pd.DataFrame, threshold: float = 0.95) -> str | None:
 # Terminal report
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# A single night's results
+# ---------------------------------------------------------------------------
+
+def game_dates(hist: pd.DataFrame) -> pd.Series:
+    """The date each game was played on, as ``YYYY-MM-DD`` strings.
+
+    Prefers ``game_date``, written at prediction time.  Rows logged before
+    that column existed fall back to the date part of ``predicted_at``, which
+    is the run timestamp and so can sit a day off the slate it predicted --
+    close enough to group old rows by, not close enough to rely on for new
+    ones.
+    """
+    if hist.empty:
+        return pd.Series(dtype="object")
+
+    dates = pd.Series(pd.NA, index=hist.index, dtype="object")
+    if "game_date" in hist.columns:
+        dates = hist["game_date"].astype("object").where(hist["game_date"].notna())
+    if "predicted_at" in hist.columns:
+        fallback = hist["predicted_at"].astype(str).str.slice(0, 10)
+        dates = dates.fillna(fallback)
+    return dates
+
+
+def filter_date(hist: pd.DataFrame, target: date | str) -> pd.DataFrame:
+    """Restrict to the games played on one date."""
+    if hist.empty:
+        return hist
+    wanted = target.isoformat() if isinstance(target, date) else str(target)
+    return hist[game_dates(hist) == wanted]
+
+
+def latest_played_date(hist: pd.DataFrame) -> str | None:
+    """The most recent date with scored games.
+
+    ``/yesterday`` resolves to this rather than literally yesterday: the NHL
+    has off-days and a five-month offseason, and "no games" is a worse answer
+    than the last night that actually happened.
+    """
+    done = evaluated_only(hist)
+    if done.empty:
+        return None
+    dates = game_dates(done).dropna()
+    return max(dates) if len(dates) else None
+
+
+def day_report(hist: pd.DataFrame, target: date | str | None = None) -> dict:
+    """Everything needed to report on one night's picks.
+
+    Returns the headline record plus a per-game breakdown, because the tally
+    alone is not readable: 3-4 where every loss was a Toss-Up is a different
+    night from 3-4 where two Strong Picks went down, and only the second is
+    worth looking at.
+    """
+    if target is None:
+        target = latest_played_date(hist)
+    if target is None:
+        return {"date": None, "n": 0, "games": []}
+
+    day = filter_date(hist, target)
+    done = evaluated_only(day)
+    wanted = target.isoformat() if isinstance(target, date) else str(target)
+
+    report = {
+        "date": wanted,
+        "n_logged": len(day),
+        "n": len(done),
+        "games": [],
+    }
+    if done.empty:
+        return report
+
+    report.update(summarize(done))
+    report["market"] = market_comparison(done)
+
+    for _, row in done.iterrows():
+        prob = float(row["prob_home_win"])
+        picked_home = prob >= 0.5
+        report["games"].append({
+            "home_team":  row["home_team"],
+            "away_team":  row["away_team"],
+            "pick":       row["home_team"] if picked_home else row["away_team"],
+            "prob":       prob if picked_home else 1.0 - prob,
+            "confidence": confidence_label(max(prob, 1.0 - prob)),
+            "correct":    bool(row["correct"]),
+            "brier":      float(row["brier"]),
+            "actual_home_win": float(row["actual_home_win"]),
+            "closing_prob_home": (
+                float(row["closing_prob_home"])
+                if "closing_prob_home" in row.index
+                and pd.notna(row["closing_prob_home"])
+                else None
+            ),
+        })
+
+    misses = [g for g in report["games"] if not g["correct"]]
+    report["strong_misses"] = [g for g in misses if g["confidence"] == "Strong Pick"]
+    return report
+
+
+def print_day_report(hist, target=None) -> None:
+    """Print one night's results -- the reflection half of the daily loop."""
+    report = day_report(hist, target)
+    if not report["date"]:
+        print("No scored predictions yet.")
+        return
+    if not report["n"]:
+        print(f"No scored predictions for {report['date']} "
+              f"({report.get('n_logged', 0)} logged).")
+        return
+
+    print(f"\n{'=' * 56}")
+    print(f"  Results -- {report['date']}")
+    print(f"{'=' * 56}")
+    print(f"  Record:     {report['wins']}-{report['losses']}  "
+          f"({report['accuracy']:.0%})")
+    print(f"  Brier:      {report['brier']:.4f}   "
+          f"(no-skill {report['baseline_brier']:.4f})")
+
+    market = report.get("market") or {}
+    if market.get("n"):
+        print(f"  vs close:   model {market['model_brier']:.4f}   "
+              f"market {market['market_brier']:.4f}   "
+              f"on {market['n']} game(s)")
+
+    print()
+    for g in report["games"]:
+        mark = "win " if g["correct"] else "loss"
+        other = g["away_team"] if g["pick"] == g["home_team"] else g["home_team"]
+        print(f"    {mark}  {g['pick']:>4} over {other:<4} "
+              f"{g['prob']:>4.0%}  {g['confidence']}")
+
+    strong = report.get("strong_misses") or []
+    if strong:
+        print(f"\n  {len(strong)} Strong Pick(s) missed -- worth a look.")
+    elif report["losses"]:
+        print("\n  Every miss was a Lean or a Toss-Up, which is close to noise.")
+    print(f"{'=' * 56}")
+
+
 def print_accuracy_report(hist: pd.DataFrame, season: str | None = None) -> None:
     """Print a summary of prediction accuracy."""
     scoped = filter_season(hist, season)
@@ -569,6 +713,11 @@ if __name__ == "__main__":
         "--season", default=current_season(),
         help='Season to report on, or "all" (default: current season)',
     )
+    parser.add_argument(
+        "--day", nargs="?", const="latest", default=None,
+        help="Report one night instead of a season. Bare --day uses the most "
+             "recent scored slate; pass a YYYY-MM-DD to pick one.",
+    )
     args = parser.parse_args()
 
     hist = backfill_outcomes()
@@ -577,6 +726,8 @@ if __name__ == "__main__":
         hist.to_parquet(HISTORY_PATH, index=False)
     if hist.empty:
         print("No prediction history to evaluate yet.")
+    elif args.day:
+        print_day_report(hist, None if args.day == "latest" else args.day)
     else:
         season = None if args.season.lower() == "all" else args.season
         if season and not len(filter_season(hist, season)):
