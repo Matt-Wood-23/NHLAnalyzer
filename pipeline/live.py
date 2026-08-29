@@ -36,7 +36,7 @@ from features.goalie_mp import GOALIE_WINDOWS
 from features.special_teams import ST_WINDOWS
 from features.context import _DIVISIONS, _CONFERENCES
 from ingestion.nhl_api import fetch_schedule
-from config.season import approximate_game_date, current_season, season_start
+from config.season import approximate_game_date, current_season, season_start, game_number
 from pipeline.evaluate_history import HISTORY_PATH
 
 logger = logging.getLogger(__name__)
@@ -83,7 +83,7 @@ def _build_team_snapshot(
     df = pd.read_parquet(parquet_path)
     df = _add_derived_columns(df)
     df = _add_regulation_wins(df)
-    df["game_num"] = df["game_id"].str[-4:].astype(int)
+    df["game_num"] = game_number(df["game_id"])
 
     history = df[df["season"] == season].sort_values(["team", "game_num"])
     if history.empty:
@@ -122,7 +122,7 @@ def _build_goalie_snapshot() -> pd.DataFrame:
     if starters.empty:
         return pd.DataFrame()
 
-    starters["game_num"] = starters["game_id"].str[-4:].astype(int)
+    starters["game_num"] = game_number(starters["game_id"])
     starters = starters.sort_values(["goalie_id", "season", "game_num"])
 
     # Compute rolling per goalie
@@ -297,7 +297,7 @@ def _team_last_game_date(
         parquet_path = PARQUET_DIR / "moneypuck_team_game_stats.parquet"
 
     df = pd.read_parquet(parquet_path, columns=["game_id", "team", "season"])
-    df["game_num"] = df["game_id"].str[-4:].astype(int)
+    df["game_num"] = game_number(df["game_id"])
     df = df.sort_values(["team", "season", "game_num"])
 
     result: dict[str, date] = {}

@@ -189,3 +189,23 @@ def approximate_game_date(season: str | int, game_num: int) -> date:
     """
     offset = int(game_num / TOTAL_GAMES * SEASON_DAYS)
     return season_start(season) + timedelta(days=offset)
+
+
+def game_number(game_ids) -> "pd.Series":
+    """Chronological sort key within a season, from the NHL game ID.
+
+    An NHL game ID is ``SSSSTTNNNN`` — season, game type, sequence.  The
+    obvious key, the trailing four digits, collides across game types: regular
+    season ``2024020311`` and playoff ``2024030311`` both yield 311, so playoff
+    games sort into the middle of the regular season.  Every rolling feature
+    keyed on that ordering then sees a player's playoff games as though they
+    happened in January, which leaks later results into earlier rows.
+
+    Taking ``TTNNNN`` instead keeps type ordering intact (20311 < 30311) and is
+    still a plain integer, so it is a drop-in for the old key.
+
+    351 of the 6,877 games in the matrices are playoffs, affecting 643 of 1,471
+    skaters, so this is not hypothetical.
+    """
+    import pandas as pd
+    return pd.Series(game_ids).astype(str).str[4:].astype(int)

@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from config.season import game_number
+
 from ingestion.moneypuck import mp_game_id_to_nhl, MP_SEASONS
 
 logger = logging.getLogger(__name__)
@@ -125,7 +127,7 @@ def aggregate_goalie_game_stats(raw_dir: Path | None = None) -> pd.DataFrame:
     )
 
     # Game number for sorting (last 4 digits)
-    agg["game_num"] = agg["game_id"].str[-4:].astype(int)
+    agg["game_num"] = game_number(agg["game_id"])
 
     logger.info(
         "Goalie game stats: %d rows (%d starters) across %d games",

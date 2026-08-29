@@ -35,7 +35,7 @@ import httpx
 import pandas as pd
 from dotenv import load_dotenv
 
-from config.season import current_season as _current_season
+from config.season import current_season as _current_season, game_number
 from pipeline.evaluate_history import confidence_label
 
 logger = logging.getLogger(__name__)
@@ -380,7 +380,7 @@ def build_team_recap(team: str, n_games: int = 10) -> dict:
     if team_games.empty:
         return {}
 
-    team_games["game_num"] = team_games["game_id"].str[-4:].astype(int)
+    team_games["game_num"] = game_number(team_games["game_id"])
     team_games = team_games.sort_values(["season", "game_num"])
     recent = team_games.tail(n_games)
 

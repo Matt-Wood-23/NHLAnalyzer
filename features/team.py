@@ -15,6 +15,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from config.season import game_number
+
 logger = logging.getLogger(__name__)
 
 PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
@@ -245,7 +247,7 @@ def load_team_features(parquet_path: Path | str | None = None) -> pd.DataFrame:
     df = _add_regulation_wins(df)
 
     # Sort key: last 4 digits of NHL game_id = sequential game number within season
-    df["game_num"] = df["game_id"].str[-4:].astype(int)
+    df["game_num"] = game_number(df["game_id"])
     df = df.sort_values(["team", "season", "game_num"])
 
     logger.info("Computing rolling features (windows=%s) ...", WINDOWS)

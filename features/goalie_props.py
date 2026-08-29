@@ -22,6 +22,8 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 
+from config.season import game_number
+
 logger = logging.getLogger(__name__)
 
 PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
@@ -86,7 +88,7 @@ def load_goalie_game_stats(path: Optional[Path] = None) -> pd.DataFrame:
     df = pd.read_parquet(path)
     df = df[df["is_starter"]].copy()
     if "game_num" not in df.columns:
-        df["game_num"] = df["game_id"].astype(str).str[-4:].astype(int)
+        df["game_num"] = game_number(df["game_id"])
     return df.sort_values(["goalie_id", "season", "game_num"])
 
 
@@ -163,7 +165,7 @@ def pregame_goalie_snapshot(
     """
     history = history.copy()
     if "game_num" not in history.columns:
-        history["game_num"] = history["game_id"].astype(str).str[-4:].astype(int)
+        history["game_num"] = game_number(history["game_id"])
 
     wanted = sorted(set(goalie_ids or []) | set(history["goalie_id"].dropna().unique()))
     feature_cols = rolling_feature_columns()

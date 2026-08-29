@@ -25,7 +25,7 @@ from ingestion.player_stats import (
     fetch_player_game_log,
     toi_to_seconds,
 )
-from config.season import current_season_api
+from config.season import current_season_api, game_number
 
 logger = logging.getLogger(__name__)
 
@@ -77,8 +77,9 @@ def build_player_rolling_features(
         player_game_stats = load_player_game_stats()
 
     df = player_game_stats.copy()
-    # Sort: chronological within each player (game_num = last 4 digits of game_id)
-    df["game_num"] = df["game_id"].str[-4:].astype(int)
+    # Sort: chronological within each player.  game_number keeps playoff
+    # games after the regular season instead of colliding with it.
+    df["game_num"] = game_number(df["game_id"])
     df = df.sort_values(["player_id", "season", "game_num"])
 
     parts = []
@@ -125,7 +126,7 @@ def pregame_player_snapshot(
     """
     history = history.copy()
     if "game_num" not in history.columns:
-        history["game_num"] = history["game_id"].astype(str).str[-4:].astype(int)
+        history["game_num"] = game_number(history["game_id"])
 
     wanted = sorted(set(player_ids or []) | set(history["player_id"].unique()))
     stat_cols = [c for c in PLAYER_ROLL_STATS if c in history.columns]

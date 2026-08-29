@@ -14,6 +14,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+from config.season import game_number
+
 from ingestion.moneypuck import mp_game_id_to_nhl, MP_SEASONS
 
 logger = logging.getLogger(__name__)
@@ -149,7 +151,7 @@ def aggregate_special_teams_stats(raw_dir: Path | None = None) -> pd.DataFrame:
     )
 
     # Game number for sorting
-    result["game_num"] = result["game_id"].str[-4:].astype(int)
+    result["game_num"] = game_number(result["game_id"])
 
     logger.info(
         "Special teams stats: %d team-game rows across %d games",

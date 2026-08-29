@@ -76,3 +76,54 @@ class TestSeasonStarts:
 
     def test_total_games_matches_a_32_team_league(self):
         assert cfg.TOTAL_GAMES == 32 * 82 // 2
+
+
+class TestGameNumber:
+    """The sort key every rolling feature depends on.
+
+    game_id is SSSSTTNNNN.  Keying on the trailing four digits collides across
+    game types, so playoff game 2024030311 and regular-season 2024020311 both
+    became 311 and a player's playoff games sorted into the middle of his
+    regular season -- leaking later results into earlier rows for the 643 of
+    1471 skaters whose teams made the playoffs.
+    """
+
+    def test_playoffs_sort_after_the_regular_season(self):
+        from config.season import game_number
+        nums = game_number(["2024020311", "2024030311"])
+        assert nums.iloc[0] < nums.iloc[1]
+
+    def test_the_old_key_would_have_collided(self):
+        """Pins why this helper exists rather than the obvious one-liner."""
+        assert "2024020311"[-4:] == "2024030311"[-4:]
+
+    def test_ordering_within_a_type_is_preserved(self):
+        from config.season import game_number
+        nums = game_number(["2024020001", "2024020100", "2024021312"]).tolist()
+        assert nums == sorted(nums)
+
+    def test_it_returns_plain_ints(self):
+        """Callers sort and compare on it, and one builds a placeholder row
+        from max() + 1."""
+        from config.season import game_number
+        import numpy as np
+        assert np.issubdtype(game_number(["2024020001"]).dtype, np.integer)
+
+    def test_it_accepts_a_series_or_a_list(self):
+        import pandas as pd
+        from config.season import game_number
+        as_list = game_number(["2024020311"]).tolist()
+        as_series = game_number(pd.Series(["2024020311"])).tolist()
+        assert as_list == as_series == [20311]
+
+    def test_every_module_uses_the_shared_key(self):
+        """13 call sites had their own copy of the buggy expression."""
+        import pathlib
+        root = pathlib.Path(__file__).resolve().parent.parent
+        offenders = [
+            p.relative_to(root).as_posix()
+            for p in root.rglob("*.py")
+            if "tests" not in p.parts and "__pycache__" not in p.parts
+            and 'str[-4:]' in p.read_text(encoding="utf-8")
+        ]
+        assert offenders == [], f"still deriving game_num by hand: {offenders}"
