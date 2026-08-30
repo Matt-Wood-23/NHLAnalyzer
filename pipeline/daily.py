@@ -58,7 +58,8 @@ def refresh_data(conn=None):
     # Step 3: Rebuild the full feature matrix
     logger.info("Rebuilding feature matrix...")
     from pipeline.backfill import (
-        build_feature_matrix, build_player_game_stats, save_feature_matrix,
+        build_boxscore_spine, build_feature_matrix, build_player_game_stats,
+        save_feature_matrix,
     )
     matrix = build_feature_matrix(conn=conn)
     save_feature_matrix(matrix)
@@ -68,6 +69,11 @@ def refresh_data(conn=None):
     # predicts from these, so they must refresh with everything else.
     logger.info("Rebuilding player game stats...")
     build_player_game_stats()
+
+    # Step 5: The dressed-lineup spine, which is what the props model actually
+    # reads.  Step 4 alone left it frozen while reporting a successful refresh.
+    logger.info("Refreshing boxscore spine...")
+    build_boxscore_spine()
 
 
 def score_predictions():

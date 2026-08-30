@@ -284,6 +284,55 @@ def build_player_game_stats() -> Path | None:
     return path
 
 
+def build_boxscore_spine() -> Path | None:
+    """Refresh the dressed-lineup spine the SOG model trains and serves from.
+
+    Must run *after* :func:`build_player_game_stats`, because the merge joins
+    MoneyPuck's xG onto the boxscore lineup and wants both current.
+
+    Cheap in season: final games cache permanently, so a daily run fetches only
+    last night's slate.  A cold run pulls all ~6,900 games in about 210s.
+
+    Without this the daily pipeline refreshed ``player_game_stats.parquet`` and
+    left ``player_game_stats_full.parquet`` frozen -- and since
+    ``ingestion.player_stats.player_game_stats_path`` prefers the latter, the
+    props model would have served a stale spine indefinitely while every log
+    line said the data had been refreshed.
+    """
+    from ingestion.boxscore import (
+        backfill_boxscores, build_goalie_starts, build_skater_game_stats,
+        game_universe, merge_shot_data, save_parquet,
+    )
+
+    try:
+        games = game_universe()
+    except FileNotFoundError as e:
+        logger.warning("Skipping boxscore spine: %s", e)
+        return None
+
+    tally = backfill_boxscores(games)
+    logger.info(
+        "Boxscores: %d fetched, %d cached, %d failed",
+        tally["fetched"], tally["cached"], tally["failed"],
+    )
+
+    skaters = build_skater_game_stats(games)
+    if skaters.empty:
+        logger.warning("No skater rows parsed — leaving the spine as it was")
+        return None
+    save_parquet(skaters, "skater_game_stats")
+
+    goalies = build_goalie_starts(games)
+    if not goalies.empty:
+        save_parquet(goalies, "goalie_starts")
+
+    merged = merge_shot_data(skaters)
+    if merged.empty:
+        logger.warning("Merge produced nothing — leaving the spine as it was")
+        return None
+    return save_parquet(merged, "player_game_stats_full")
+
+
 def save_feature_matrix(matrix: pd.DataFrame, name: str = "feature_matrix") -> Path:
     PARQUET_DIR.mkdir(parents=True, exist_ok=True)
     path = PARQUET_DIR / f"{name}.parquet"

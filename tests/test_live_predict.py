@@ -166,3 +166,38 @@ class TestSnapshotSeasonScoping:
         from pipeline import live, saves_live
         assert "likely_starters" in inspect.getsource(live._build_goalie_snapshot)
         assert "likely_starters" in inspect.getsource(saves_live.probable_starters)
+
+
+class TestDailyRefreshCompleteness:
+    """The daily run must refresh every file the serving path reads.
+
+    It refreshed player_game_stats.parquet but not the _full spine that
+    replaced it as the model's source, so props would have served a frozen
+    snapshot indefinitely while every log line reported a successful refresh.
+    """
+
+    def test_the_daily_refresh_rebuilds_the_boxscore_spine(self):
+        import inspect
+        from pipeline import daily
+        assert "build_boxscore_spine" in inspect.getsource(daily.refresh_data)
+
+    def test_the_spine_is_rebuilt_after_the_moneypuck_aggregation(self):
+        """The merge joins MoneyPuck xG onto the lineup, so it must run second
+        or it joins yesterday's shot data onto today's lineup."""
+        import inspect
+        src = inspect.getsource(__import__("pipeline.daily", fromlist=["x"]).refresh_data)
+        assert src.index("build_player_game_stats()") < src.index("build_boxscore_spine()")
+
+    def test_every_parquet_the_resolver_can_pick_gets_refreshed(self):
+        """If player_game_stats_path can return it, something must rebuild it."""
+        import inspect
+        from ingestion import player_stats
+        from pipeline import daily, backfill
+
+        resolver = inspect.getsource(player_stats.player_game_stats_path)
+        refreshed = (inspect.getsource(daily.refresh_data)
+                     + inspect.getsource(backfill.build_boxscore_spine)
+                     + inspect.getsource(backfill.build_player_game_stats))
+        for name in ("player_game_stats_full", "player_game_stats"):
+            assert name in resolver
+            assert name in refreshed, f"{name} is served but never rebuilt"
