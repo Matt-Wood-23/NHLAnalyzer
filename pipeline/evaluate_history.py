@@ -20,6 +20,7 @@ import argparse
 import logging
 from datetime import date
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -578,6 +579,85 @@ def day_report(hist: pd.DataFrame, target: date | str | None = None) -> dict:
     misses = [g for g in report["games"] if not g["correct"]]
     report["strong_misses"] = [g for g in misses if g["confidence"] == "Strong Pick"]
     return report
+
+
+def edge_report(
+    predictions: pd.DataFrame,
+    hist: Optional[pd.DataFrame] = None,
+    min_edge: float = 0.03,
+) -> dict:
+    """Rank tonight's disagreements between the model and the market.
+
+    An edge is stated from the side the model favours: if the model likes the
+    home team at 0.62 and the market prices it 0.55, that is +7 points on the
+    home side.  Both sides of a game carry the same magnitude, so ranking by
+    the favoured side loses nothing and reads the way a bet does.
+
+    **A disagreement is a hypothesis, not an edge.** The model can differ from
+    the market because it knows something or because it is wrong, and nothing
+    in this report distinguishes the two -- only closing-line value does, over
+    weeks.  ``realization`` carries the historical answer where there is one,
+    which is the only part of this that has been tested against outcomes.
+
+    Args:
+        predictions: output of ``pipeline.live.run``, carrying
+                     ``prob_home_win`` and ``market_prob_home``.
+        hist:        prediction history, for the realization table.
+        min_edge:    disagreements smaller than this are noise, not signal.
+
+    Returns:
+        ``{n_priced, n_games, edges: [...], realization: {...}, clv: {...}}``.
+    """
+    out: dict = {
+        "n_games": int(len(predictions)),
+        "n_priced": 0,
+        "min_edge": min_edge,
+        "edges": [],
+        "realization": {},
+        "clv": {},
+    }
+    if predictions.empty or "market_prob_home" not in predictions.columns:
+        return out
+
+    df = predictions.copy()
+    df["market_prob_home"] = pd.to_numeric(df["market_prob_home"], errors="coerce")
+    df = df[df["market_prob_home"].notna()]
+    out["n_priced"] = int(len(df))
+    if df.empty:
+        return out
+
+    model = pd.to_numeric(df["prob_home_win"], errors="coerce")
+    market = df["market_prob_home"]
+    picked_home = model >= 0.5
+
+    df = df.assign(
+        pick=np.where(picked_home, df["home_team"], df["away_team"]),
+        against=np.where(picked_home, df["away_team"], df["home_team"]),
+        model_p=np.where(picked_home, model, 1 - model),
+        market_p=np.where(picked_home, market, 1 - market),
+    )
+    df["edge"] = df["model_p"] - df["market_p"]
+    df = df[df["edge"] >= min_edge].sort_values("edge", ascending=False)
+
+    out["edges"] = [
+        {
+            "game_id":    str(r["game_id"]),
+            "pick":       str(r["pick"]),
+            "against":    str(r["against"]),
+            "model_p":    float(r["model_p"]),
+            "market_p":   float(r["market_p"]),
+            "edge":       float(r["edge"]),
+            "confidence": confidence_label(float(r["model_p"])),
+        }
+        for _, r in df.iterrows()
+    ]
+
+    if hist is not None and not hist.empty:
+        table = edge_realization(hist)
+        if not table.empty:
+            out["realization"] = table.to_dict("index")
+        out["clv"] = clv_summary(hist)
+    return out
 
 
 def print_day_report(hist, target=None) -> None:

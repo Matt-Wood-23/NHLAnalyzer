@@ -7,7 +7,7 @@ Two modes:
        Requires: DISCORD_WEBHOOK_URL env var.
 
   2. Bot mode (persistent, slash commands):
-       Full py-cord bot with /predictions, /props, /saves and /yesterday commands.
+       Full py-cord bot with /predictions, /props, /saves, /yesterday and /edge commands.
        Requires: DISCORD_BOT_TOKEN env var.
 
 Usage:
@@ -522,6 +522,105 @@ def format_elo_embeds(top_n: int = 32) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Embed builders — model vs market
+# ---------------------------------------------------------------------------
+
+def format_edge_embed(report: dict, pred_date) -> dict:
+    """Build the /edge embed: where the model disagrees with the price.
+
+    Leads with the caveat rather than burying it. A disagreement is a
+    hypothesis — the model differs from the market either because it knows
+    something or because it is wrong, and nothing on this screen separates
+    those. Only closing-line value does, over weeks. The realization field is
+    the one part that has been checked against outcomes.
+    """
+    if not report or not report.get("n_priced"):
+        return {
+            "title": f"Edges — {pred_date}",
+            "description": (
+                f"No market prices for the {report.get('n_games', 0)} game(s) "
+                "on this slate, so there is nothing to compare against. "
+                "Prices are captured when `pipeline.live` runs."
+            ),
+            "color": _COLOR_EVEN,
+        }
+
+    edges = report.get("edges") or []
+    min_edge = report.get("min_edge", 0.03)
+
+    if not edges:
+        return {
+            "title": f"Edges — {pred_date}",
+            "description": (
+                f"The model agrees with the market on all "
+                f"{report['n_priced']} priced game(s) — nothing above "
+                f"{min_edge:.0%}. That is the normal result."
+            ),
+            "color": _COLOR_EVEN,
+        }
+
+    lines = []
+    for e in edges:
+        lines.append(
+            "`{:>5}  {:>4} over {:<4}  {:>3.0f}% vs {:>3.0f}%  {}`".format(
+                f"{e['edge']:+.1%}", e["pick"], e["against"],
+                e["model_p"] * 100, e["market_p"] * 100, e["confidence"],
+            )
+        )
+
+    fields = [{
+        "name": f"{len(edges)} disagreement(s) above {min_edge:.0%}",
+        "value": "\n".join(lines),
+        "inline": False,
+    }]
+
+    real = report.get("realization") or {}
+    if real:
+        rows = ["`bucket     model  market  actual    n`"]
+        for bucket, stats in real.items():
+            n = int(stats.get("n", 0))
+            if not n:
+                continue
+            rows.append(
+                "`{:<9} {:>5.0%}  {:>5.0%}  {:>5.0%}  {:>4}`".format(
+                    str(bucket), stats["model_said"], stats["market_said"],
+                    stats["actual"], n,
+                )
+            )
+        if len(rows) > 1:
+            fields.append({
+                "name": "Did claimed edge actually pay?",
+                "value": "\n".join(rows),
+                "inline": False,
+            })
+
+    clv = report.get("clv") or {}
+    if clv.get("n"):
+        fields.append({
+            "name": "Closing line value",
+            "value": (
+                f"mean `{clv['mean_clv']:+.4f}` \u00b7 "
+                f"beat the close `{clv['beat_close_rate']:.0%}` "
+                f"of {clv['n']} game(s)"
+            ),
+            "inline": False,
+        })
+
+    return {
+        "title": f"Model vs market \u2014 {pred_date}",
+        "description": (
+            "Edge is stated from the side the model favours. **A disagreement "
+            "is a hypothesis, not an edge** \u2014 it means the model and the "
+            "book differ, not that the model is right. Only CLV settles that."
+        ),
+        "color": _COLOR_PROPS,
+        "fields": fields,
+        "footer": {"text": f"NHL Analyzer \u2022 {report['n_priced']} of "
+                           f"{report['n_games']} game(s) had a price"},
+    }
+
+
+# ---------------------------------------------------------------------------
 # Embed builders — one night's results
 # ---------------------------------------------------------------------------
 
@@ -837,6 +936,7 @@ def send_predictions_webhook(
     props_df=None,
     saves_df=None,
     results_report=None,
+    edge_report_data=None,
 ) -> bool:
     """Format and post daily predictions (and optionally props) to a Discord webhook."""
     if pred_date is None:
@@ -877,6 +977,12 @@ def send_predictions_webhook(
             return False
 
     # Last night's results -- the reflection half of the daily loop
+    if edge_report_data:
+        if not post_webhook(
+            webhook_url, [format_edge_embed(edge_report_data, pred_date)],
+        ):
+            return False
+
     if results_report:
         if not post_webhook(webhook_url, [format_day_embed(results_report)]):
             return False
@@ -1044,6 +1150,37 @@ def run_bot(token: str) -> None:
             await ctx.followup.send(f"Error loading ELO rankings: {e}")
 
     @bot.slash_command(
+        name="edge",
+        description="Where the model disagrees with the market price",
+    )
+    async def edge_cmd(
+        ctx: discord.ApplicationContext,
+        date_str: discord.Option(
+            str, "Date (YYYY-MM-DD). Default: today",
+            required=False, default="",
+        ),
+        min_edge: discord.Option(
+            float, "Minimum disagreement to show (default 0.03 = 3 points)",
+            required=False, default=0.03,
+        ),
+    ):
+        await ctx.defer()
+        try:
+            from pipeline.live import run as live_run
+            from pipeline.evaluate_history import edge_report, load_history
+
+            target = date.fromisoformat(date_str) if date_str else date.today()
+            # dry_run so asking for edges never writes to the prediction log;
+            # pipeline.daily is what records the canonical prediction.
+            preds = live_run(target_date=target, dry_run=True)
+            report = edge_report(preds, hist=load_history(), min_edge=min_edge)
+            embed = format_edge_embed(report, target)
+            await ctx.followup.send(embed=discord.Embed.from_dict(embed))
+        except Exception as e:
+            logger.error("edge_cmd error: %s", e)
+            await ctx.followup.send(f"Error building edge report: {e}")
+
+    @bot.slash_command(
         name="yesterday",
         description="How the last slate of predictions actually did",
     )
@@ -1124,6 +1261,8 @@ if __name__ == "__main__":
                         help="Also post goalie saves projections (webhook mode only)")
     parser.add_argument("--results", action="store_true",
                         help="Also post how the last scored slate did (webhook mode only)")
+    parser.add_argument("--edge", action="store_true",
+                        help="Also post model-vs-market disagreements (webhook mode only)")
     args = parser.parse_args()
 
     target = date.fromisoformat(args.date) if args.date else date.today()
@@ -1157,6 +1296,12 @@ if __name__ == "__main__":
             logger.info("Running goalie saves pipeline...")
             saves = saves_run(target_date=target)
 
+        edges = None
+        if args.edge:
+            from pipeline.evaluate_history import edge_report, load_history
+            logger.info("Building model-vs-market edges...")
+            edges = edge_report(preds, hist=load_history())
+
         results = None
         if args.results:
             from pipeline.evaluate_history import day_report, load_history
@@ -1165,7 +1310,7 @@ if __name__ == "__main__":
 
         success = send_predictions_webhook(
             preds, webhook_url, pred_date=target, props_df=props,
-            saves_df=saves, results_report=results,
+            saves_df=saves, results_report=results, edge_report_data=edges,
         )
 
         if conn:
