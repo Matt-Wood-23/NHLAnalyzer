@@ -176,6 +176,29 @@ A team with no games yet gets an all-NaN row instead of being dropped, which
 is exactly what the model saw for opening night during training — and means
 no game silently disappears from the first few days of the schedule.
 
+### Snapshots reset where training resets, and only there
+
+Rolling features are computed one way in training and have to be served the
+same way, and the two are not uniform across feature families:
+
+| Feature | Training | Live snapshot |
+|:--|:--|:--|
+| Team rolling | within season | scoped to season |
+| Special teams | within season | scoped to season |
+| Opponent quality | within season | scoped to season |
+| Goalie form | **across** seasons | **spans** seasons |
+| Rest / back-to-back | **across** seasons | **spans** seasons |
+
+Getting this uniform would be the bug. `features.goalie_mp` deliberately rolls
+per goalie with no season reset, and `features.context` computes rest with
+`groupby("team")` alone — so on opening night training saw roughly 180 days of
+rest, and a live path that reset would be answering a different question from
+the one the model was fitted on.
+
+The three that *are* scoped serve NaN in October, which is exactly what the
+model saw in training on an opening night, and what the coverage guard below
+is there to catch.
+
 ### Feature coverage guard
 
 The model pipeline imputes missing values with column means, so an upstream
@@ -348,6 +371,40 @@ window drifts onto goalies since traded or sent down. Every row carries
 `starter_basis` ("7 of last 10 starts") and a `starter_confidence` share, so
 the guess is always visible as a guess.
 
+### /edge — Model vs Market
+
+Ranks tonight's disagreements between the model's probability and the price
+captured when the prediction was made. Edge is always stated from the side the
+model favours: an away pick at 0.41 home is a 0.59 pick on the away side, so
++9 points rather than −9. Anything under three points is noise and is filtered.
+
+**A disagreement is a hypothesis, not an edge.** The model can differ from the
+book because it knows something or because it is wrong, and nothing on that
+screen separates the two — only closing-line value does, and only over weeks.
+The command reports; it does not advise.
+
+The historical buckets that ride along are the part that has been checked
+against outcomes, on the 91 scored games that carry a closing price:
+
+| bucket | n | model said | market said | actual | p vs market |
+|:--|--:|--:|--:|--:|--:|
+| < −5% | 11 | 55.9% | 63.8% | 72.7% | 0.756 |
+| −5..−2% | 13 | 57.6% | 60.6% | 23.1% | 0.008 |
+| −2..+2% | 28 | 57.1% | 56.9% | 46.4% | 0.340 |
+| +2..+5% | 8 | 58.4% | 54.8% | 62.5% | 0.737 |
+| > +5% | 31 | 59.7% | 49.9% | 64.5% | 0.110 |
+
+The `> +5%` row is the one that looks like an edge, and it does not survive:
+p = 0.110. The one significant bucket points the wrong way, and is about what
+five tested buckets throw up by chance. So: no evidence of edge yet. That is
+the honest reading, and it matches the retroactive CLV check, whose bootstrap
+CI spanned zero.
+
+Running `/edge` never writes to the prediction log — it predicts with
+`dry_run=True`, so asking for it cannot overwrite what the daily run recorded.
+
+---
+
 ### /yesterday — Last Night's Results
 
 How the most recent scored slate actually did. Defaults to the last night with
@@ -453,16 +510,17 @@ python -m pipeline.train --model random_forest
 # Daily workflow: refresh data, score old predictions, predict today's games
 python -m pipeline.daily
 
-# Get today's predictions (without refreshing data)
+# Get today's predictions without recording them.  --dry-run writes nothing:
+# not Postgres, and not the prediction history log.
 python -m pipeline.live --dry-run
 
 # Get predictions for a specific date
 python -m pipeline.live --date 2026-03-15 --dry-run
 
 # Post predictions to Discord
-DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... python -m bot.discord_bot --webhook --props --saves --results
+DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/... python -m bot.discord_bot --webhook --props --saves --edge --results
 
-# Run the Discord bot (slash commands: /predictions, /props, /saves, /yesterday, /elo, /history)
+# Run the Discord bot (slash commands: /predictions, /props, /saves, /edge, /yesterday, /elo, /history)
 DISCORD_BOT_TOKEN=... python -m bot.discord_bot --bot
 
 # Evaluate prediction accuracy over time

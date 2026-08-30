@@ -6,10 +6,8 @@ Written for whoever picks this up next, human or agent.
 was written before any of it had touched real data — see
 [Verified vs. not](#verified-vs-not).
 
-**Session 2** ([below](#session-2--props-overhaul-29-august-2026)) and
-**Session 3** ([below](#session-3--the-boxscore-spine-29-august-2026)) were
-both run against real data. Seven commits on `main`, unpushed, 264 tests
-passing.
+**Sessions 2, 3 and 4** (below) were all run against real data. Twelve
+commits on `main`, unpushed, 302 tests passing.
 
 ---
 
@@ -661,6 +659,8 @@ clean one.
 
 ## Open items after Session 3
 
+*(The pre-season items below are done — see [Session 4](#session-4--pre-season-cleanup-29-august-2026).)*
+
 Carried forward and re-ranked. Everything under Session 2's list that is not
 repeated here is done.
 
@@ -719,3 +719,135 @@ opening night, which is when it bites.
 - Automating the daily run is still undecided (PC vs Pi). `pipeline.daily` is
   one command; what is missing is a lockfile, failure notification through the
   existing webhook, and retry on the MoneyPuck download.
+
+
+---
+
+# Session 4 — pre-season cleanup, 29 August 2026
+
+Four commits, 302 tests (was 264). The pre-season list from Session 3, cleared.
+
+## 16. `--dry-run` was writing the prediction log
+
+`dry_run` guarded only the Postgres write, so every dry run appended to
+`prediction_history.parquet` — the one file here that cannot be rebuilt from
+source data, because it records what the model believed *before* the games
+were played.
+
+**The flag could not just be widened.** `pipeline.daily` passed `dry_run=True`
+meaning "skip Postgres" while relying on the history still being written.
+Widening it would have silently stopped the daily loop recording anything —
+the exact failure that is invisible until you go looking for results weeks
+later. They are two flags now, and `daily.py` says which it wants.
+
+This also stops `/predictions` overwriting the logged prediction: history
+deduplicates on `(game_id, model_name)` keeping the last write, so a Discord
+user asking for predictions was replacing the probability the daily run
+recorded — which for CLV is the whole point, since it should be the belief at
+price time.
+
+## 17. The goalie snapshot picked the wrong goalie
+
+`_build_goalie_snapshot` sorted by `("goalie_id", "season", "game_num")` and
+took each team group's last row. That is the *highest goalie_id's* final start,
+not the team's most recent. For BOS in 2025-26 it served Swayman's rolling
+stats on a night Korpisalo had started last.
+
+It also used "whoever started last" (45.6%, Session 3). Both serving paths now
+share `features.goalie_props.likely_starters` (59.7%), so the outcome model and
+the saves prop cannot put different goalies in net for the same game.
+
+## 18. Snapshots reset where training resets — and only there
+
+The Session 3 list called for making the snapshots "uniform". That was the
+wrong instruction, and checking each feature family against its training code
+is what caught it:
+
+| Feature | Training | Live snapshot |
+|:--|:--|:--|
+| Team rolling | within season | scoped (fixed Session 1) |
+| Special teams | within season | **was spanning — now scoped** |
+| Opponent quality | within season | **was spanning — now scoped** |
+| Goalie form | across seasons | spans — correct as-is |
+| Rest / back-to-back | across seasons | spans — correct as-is |
+
+`features.goalie_mp` deliberately rolls per goalie with no season reset, and
+`features.context` computes rest with `groupby("team")` alone, so training saw
+~180 days on opening night. Scoping either would have been the bug. Both are
+documented in place with a test, so the next person pattern-matching on the
+other three does not "fix" them.
+
+## 19. `/edge`
+
+Ranks tonight's disagreements, stated from the side the model favours. Reuses
+`edge_realization` and `clv_summary`, both written in Session 2 and never
+surfaced. Runs with `dry_run=True` so asking for it cannot overwrite the
+canonical logged prediction.
+
+The embed leads with the caveat rather than burying it, and a test asserts the
+word "hypothesis" stays in the description — that is the line that decides
+whether this reads as analysis or as a tip sheet.
+
+**What the history actually says**, on 91 scored games with a closing price:
+
+| bucket | n | model | market | actual | p vs market |
+|:--|--:|--:|--:|--:|--:|
+| < −5% | 11 | 55.9% | 63.8% | 72.7% | 0.756 |
+| −5..−2% | 13 | 57.6% | 60.6% | 23.1% | 0.008 |
+| −2..+2% | 28 | 57.1% | 56.9% | 46.4% | 0.340 |
+| +2..+5% | 8 | 58.4% | 54.8% | 62.5% | 0.737 |
+| > +5% | 31 | 59.7% | 49.9% | 64.5% | 0.110 |
+
+The `> +5%` row is the one that looks like an edge and it does not survive
+(p = 0.110). The single significant bucket points the wrong way and is about
+what five tested buckets produce by chance. Same conclusion as the retroactive
+CLV check: no evidence of edge yet.
+
+## 20. The season opener
+
+`SEASON_STARTS` stopped at 2025. The 2026-27 season opens **2026-10-05**,
+confirmed against the schedule API. Without it `season_start` fell back to
+Oct 8 with a warning — a three-day error feeding `approximate_game_date` and
+so the back-to-back flag.
+
+**The rollover trips on 1 September, not opening night.**
+`SEASON_ROLLOVER_MONTH` is 9, so `current_season()` flips to 2026-2027 then and
+`all_seasons()` grows to six. That is when the rest of
+`docs/SEASON_ROLLOVER.md` wants running.
+
+## Open items after Session 4
+
+### Not yet built
+
+- **Points and assists props.** The boxscore carries them with true zeros and
+  `count_model` has the machinery. Assists are the more interesting half —
+  heavily overdispersed, so expect the negative binomial to matter as it did
+  for saves.
+- **Game totals.** Still the best untouched idea: a main market, where the vig
+  is a fraction of what props carry. Mean 6.03 goals, P(over 5.5) = 0.541, and
+  the team matrix already has xGF/xGA. Expect the same league drift.
+
+### Wants a live slate
+
+Neither can be tested until games are played, and both should be checked on
+the first real one:
+
+- Does `gameInfo.scratches` populate when expected (~1h before puck drop)?
+- Can `landing.matchup.goalieComparison` confirm the tandem well enough to
+  catch injuries and callups, which no historical rule can?
+
+### Still open
+
+- **The saves model trains on MoneyPuck goalie data.** `goalie_starts.parquet`
+  has official saves and shots-against for every appearance plus a real starter
+  flag; `features/goalie_mp.py` predates it.
+- **287 features on 6,877 games.** `run_feature_selection` exists but
+  production RF ignores it; top-20 previously improved Brier 0.2416 → 0.2404.
+- **NHL Edge endpoints** — skating speed, shot speed, zone time. The only
+  untapped *feature* source found. Speculative.
+- `ingestion/odds_api.py` is dead code, superseded by `action_network.py`.
+- `pipeline/daily.py` imports `sys` and never uses it.
+- Automating the daily run is still undecided (PC vs Pi). `pipeline.daily` is
+  one command; what is missing is a lockfile, failure notification through the
+  existing webhook, and retry on the MoneyPuck download. **This is now the
+  largest single gap** — everything it would run is built and tested.
