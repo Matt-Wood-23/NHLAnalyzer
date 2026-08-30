@@ -1,0 +1,735 @@
+<title>Where the Pipeline Runs</title>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&display=swap">
+
+<style>
+  :root {
+    --ground:   #EFF3F6;
+    --surface:  #FFFFFF;
+    --sunken:   #E4EAEF;
+    --ink:      #0F1922;
+    --ink-soft: #33434F;
+    --muted:    #5C6B78;
+    --line:     #D3DCE3;
+    --line-soft:#E2E9EE;
+    --accent:   #BE2F2A;
+    --good:     #2C6A52;
+    --good-bg:  #DDEBE4;
+    --warn:     #8C6220;
+    --warn-bg:  #F2E8D6;
+    --crit:     #A32A24;
+    --crit-bg:  #F5DEDC;
+
+    --display: "Archivo", "Helvetica Neue", Arial, sans-serif;
+    --body: "IBM Plex Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+    --measure: 66ch;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #0C131A;
+      --surface:  #121C25;
+      --sunken:   #18242E;
+      --ink:      #E5EDF3;
+      --ink-soft: #C0CCD6;
+      --muted:    #8B9AA7;
+      --line:     #24323E;
+      --line-soft:#1B2731;
+      --accent:   #E56A63;
+      --good:     #5EA684;
+      --good-bg:  #172C24;
+      --warn:     #C79A4E;
+      --warn-bg:  #2E2617;
+      --crit:     #E07871;
+      --crit-bg:  #2E1A18;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #0C131A;
+    --surface:  #121C25;
+    --sunken:   #18242E;
+    --ink:      #E5EDF3;
+    --ink-soft: #C0CCD6;
+    --muted:    #8B9AA7;
+    --line:     #24323E;
+    --line-soft:#1B2731;
+    --accent:   #E56A63;
+    --good:     #5EA684;
+    --good-bg:  #172C24;
+    --warn:     #C79A4E;
+    --warn-bg:  #2E2617;
+    --crit:     #E07871;
+    --crit-bg:  #2E1A18;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 16.5px;
+    line-height: 1.62;
+    margin: 0;
+    padding: 0 1.25rem 6rem;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap { max-width: 61rem; margin: 0 auto; }
+
+  /* ---- Masthead ---------------------------------------------------- */
+
+  header.masthead {
+    display: flex;
+    flex-direction: column;
+    gap: 1.1rem;
+    padding: 4rem 0 2.25rem;
+    border-bottom: 2px solid var(--ink);
+  }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    font-weight: 600;
+  }
+
+  h1 {
+    font-family: var(--display);
+    font-weight: 700;
+    font-size: clamp(2.3rem, 6vw, 3.6rem);
+    line-height: 1.02;
+    letter-spacing: -0.024em;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  .standfirst {
+    font-size: 1.1rem;
+    color: var(--ink-soft);
+    max-width: var(--measure);
+    margin: 0;
+  }
+
+  /* ---- Sections ---------------------------------------------------- */
+
+  section { padding-top: 3.4rem; }
+
+  h2 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: clamp(1.45rem, 3vw, 1.9rem);
+    letter-spacing: -0.016em;
+    line-height: 1.16;
+    margin: 0 0 0.5rem;
+    text-wrap: balance;
+  }
+
+  h3 {
+    font-family: var(--display);
+    font-weight: 600;
+    font-size: 1.06rem;
+    letter-spacing: -0.008em;
+    margin: 2rem 0 0.4rem;
+  }
+
+  p { max-width: var(--measure); margin: 0 0 1rem; }
+  p.lede { font-size: 1.03rem; color: var(--ink-soft); }
+
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  a:focus-visible, summary:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 3px;
+  }
+
+  code {
+    font-family: var(--mono);
+    font-size: 0.86em;
+    background: var(--sunken);
+    padding: 0.09em 0.34em;
+    border-radius: 3px;
+  }
+
+  strong { font-weight: 600; }
+
+  /* ---- The two-jobs panel ------------------------------------------ */
+
+  .jobs {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(19rem, 1fr));
+    gap: 1rem;
+    margin: 1.75rem 0 0.5rem;
+  }
+
+  .job {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-top: 3px solid var(--accent);
+    padding: 1.35rem 1.4rem 1.5rem;
+  }
+
+  .job h4 {
+    font-family: var(--display);
+    font-size: 1rem;
+    margin: 0 0 0.15rem;
+    font-weight: 600;
+  }
+
+  .job .shape {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: block;
+    margin-bottom: 0.7rem;
+  }
+
+  .job p { font-size: 0.95rem; margin-bottom: 0.85rem; }
+
+  .hosts {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-soft);
+    border-top: 1px solid var(--line-soft);
+    padding-top: 0.7rem;
+    line-height: 1.75;
+  }
+
+  .hosts b { color: var(--ink); font-weight: 600; }
+
+  /* ---- Tables ------------------------------------------------------ */
+
+  .scroller {
+    overflow-x: auto;
+    margin: 1.6rem 0 0.6rem;
+    border: 1px solid var(--line);
+    background: var(--surface);
+  }
+
+  table {
+    border-collapse: collapse;
+    width: 100%;
+    min-width: 40rem;
+    font-size: 0.9rem;
+  }
+
+  table.facts { min-width: 32rem; }
+
+  th, td {
+    text-align: left;
+    padding: 0.68rem 0.95rem;
+    border-bottom: 1px solid var(--line-soft);
+    vertical-align: top;
+  }
+
+  thead th {
+    font-family: var(--mono);
+    font-size: 0.7rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    font-weight: 600;
+    background: var(--sunken);
+    border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+
+  tbody tr:last-child td { border-bottom: none; }
+
+  td.num, th.num {
+    font-family: var(--mono);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+  }
+
+  td.opt { font-weight: 600; white-space: nowrap; }
+
+  .yes { color: var(--good); font-weight: 600; }
+  .no  { color: var(--crit); font-weight: 600; }
+
+  /* ---- Option cards ------------------------------------------------ */
+
+  .option {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    padding: 1.6rem 1.6rem 1.4rem;
+    margin-top: 1.4rem;
+  }
+
+  .option > h3 { margin-top: 0; font-size: 1.22rem; }
+
+  .verdict {
+    display: inline-block;
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    font-weight: 600;
+    padding: 0.2rem 0.55rem;
+    border-radius: 2px;
+    margin-bottom: 0.75rem;
+  }
+  .verdict.good { background: var(--good-bg); color: var(--good); }
+  .verdict.warn { background: var(--warn-bg); color: var(--warn); }
+  .verdict.crit { background: var(--crit-bg); color: var(--crit); }
+
+  .option p { font-size: 0.96rem; }
+  .option p:last-child { margin-bottom: 0; }
+
+  .catch {
+    border-left: 3px solid var(--warn);
+    background: var(--warn-bg);
+    padding: 0.85rem 1.05rem;
+    margin: 1.1rem 0 0;
+    max-width: none;
+  }
+  .catch p { margin: 0; font-size: 0.92rem; max-width: none; }
+  .catch p + p { margin-top: 0.6rem; }
+  .catch .label {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.09em;
+    text-transform: uppercase;
+    color: var(--warn);
+    font-weight: 600;
+    display: block;
+    margin-bottom: 0.3rem;
+  }
+
+  /* ---- Callout ----------------------------------------------------- */
+
+  .callout {
+    background: var(--sunken);
+    border-left: 3px solid var(--accent);
+    padding: 1.15rem 1.35rem;
+    margin: 1.8rem 0;
+  }
+  .callout p { margin: 0; max-width: none; }
+  .callout p + p { margin-top: 0.7rem; }
+
+  ul { max-width: var(--measure); padding-left: 1.15rem; margin: 0 0 1rem; }
+  li { margin-bottom: 0.42rem; }
+  li::marker { color: var(--muted); }
+
+  footer {
+    margin-top: 4rem;
+    padding-top: 1.4rem;
+    border-top: 1px solid var(--line);
+    font-family: var(--mono);
+    font-size: 0.76rem;
+    color: var(--muted);
+  }
+
+  @media (max-width: 34rem) {
+    body { font-size: 16px; padding: 0 1rem 4rem; }
+    header.masthead { padding-top: 2.75rem; }
+    .option { padding: 1.25rem 1.15rem; }
+  }
+</style>
+
+<div class="wrap">
+
+  <header class="masthead">
+    <span class="eyebrow">NHLAnalyzer &middot; infrastructure</span>
+    <h1>Where the Pipeline Runs</h1>
+    <p class="standfirst">
+      Four ways to take the daily run off your desk, with what each one actually
+      costs. Every number here was measured on the repo, not estimated.
+    </p>
+  </header>
+
+  <section>
+    <h2>The choice is shaped by two jobs, not one</h2>
+    <p class="lede">
+      This is the thing that decides the answer, and it isn&rsquo;t obvious until you
+      look at what has to stay running.
+    </p>
+
+    <div class="jobs">
+      <div class="job">
+        <h4>The daily run</h4>
+        <span class="shape">starts &middot; finishes &middot; exits</span>
+        <p>
+          Refresh MoneyPuck, rebuild the feature matrix and boxscore spine, score
+          yesterday&rsquo;s picks, predict today&rsquo;s slate, post to Discord.
+          Roughly 2&ndash;4 minutes, once a day.
+        </p>
+        <div class="hosts">
+          <b>GitHub Actions</b> &check;<br>
+          <b>Oracle VM</b> &check; &nbsp; <b>Your PC</b> &check; &nbsp; <b>Pi</b> &check;
+        </div>
+      </div>
+
+      <div class="job">
+        <h4>The Discord bot</h4>
+        <span class="shape">runs forever &middot; holds a socket</span>
+        <p>
+          <code>--bot</code> mode keeps a websocket open to Discord so the nine
+          slash commands answer. Today that only works while your PC is on and
+          the process is running.
+        </p>
+        <div class="hosts">
+          <b>GitHub Actions</b> &mdash; structurally cannot<br>
+          <b>Oracle VM</b> &check; &nbsp; <b>Your PC</b> &check; &nbsp; <b>Pi</b> &check;
+        </div>
+      </div>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>So the real question is whether you want the slash commands.</strong>
+        If webhook posts are enough &mdash; predictions, props, saves, edges and
+        results pushed to a channel on a schedule &mdash; GitHub Actions covers
+        everything and needs no machine at all. If you want
+        <code>/edge</code> and <code>/yesterday</code> to answer on demand, you
+        need a host that stays up, and at that point it may as well also run the
+        daily job.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The comparison</h2>
+
+    <div class="scroller">
+      <table>
+        <thead>
+          <tr>
+            <th>Option</th>
+            <th>Daily run</th>
+            <th>Bot</th>
+            <th>Cost</th>
+            <th>Upkeep</th>
+            <th>Main risk</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="opt">GitHub Actions</td>
+            <td class="yes">Yes</td>
+            <td class="no">No</td>
+            <td>Free, unlimited<sup>&dagger;</sup></td>
+            <td>None</td>
+            <td>Schedule runs late</td>
+          </tr>
+          <tr>
+            <td class="opt">Oracle Always Free</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td>Free, no expiry</td>
+            <td>You patch a VM</td>
+            <td>Getting an instance</td>
+          </tr>
+          <tr>
+            <td class="opt">Your PC</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td>Free</td>
+            <td>Almost none</td>
+            <td>PC must be awake</td>
+          </tr>
+          <tr>
+            <td class="opt">Raspberry Pi</td>
+            <td class="yes">Yes</td>
+            <td class="yes">Yes</td>
+            <td>Hardware you own</td>
+            <td>You patch a box</td>
+            <td>RAM, if it also trains</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p style="font-size:0.85rem;color:var(--muted);max-width:var(--measure);">
+      <sup>&dagger;</sup> Actions minutes are unlimited on public repos, and
+      <code>NHLAnalyzer</code> is public. The usual 2,000&nbsp;min/month cap
+      doesn&rsquo;t apply to you.
+    </p>
+  </section>
+
+  <section>
+    <h2>What was measured</h2>
+    <p class="lede">
+      These numbers decide more than the marketing does. The first row is the
+      one that matters most.
+    </p>
+
+    <div class="scroller">
+      <table class="facts">
+        <thead>
+          <tr><th>Quantity</th><th class="num">Measured</th><th>Why it matters</th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Irreplaceable state</td>
+            <td class="num">20 KB</td>
+            <td>The prediction log, already tracked in git. Everything else is derivable.</td>
+          </tr>
+          <tr>
+            <td>Full data footprint</td>
+            <td class="num">451 MB</td>
+            <td>322&nbsp;MB MoneyPuck CSVs + 129&nbsp;MB boxscore cache. Re-downloadable.</td>
+          </tr>
+          <tr>
+            <td>Daily MoneyPuck pull</td>
+            <td class="num">59 MB</td>
+            <td>Current season only; prior seasons never change.</td>
+          </tr>
+          <tr>
+            <td>Feature matrix rebuild</td>
+            <td class="num">16.6 s</td>
+            <td>6,877 games &times; 295 columns.</td>
+          </tr>
+          <tr>
+            <td>Boxscore spine, warm</td>
+            <td class="num">8.7 s</td>
+            <td>Final games cache permanently, so only last night is fetched.</td>
+          </tr>
+          <tr>
+            <td>Boxscore spine, cold</td>
+            <td class="num">210 s</td>
+            <td>All 6,877 games. Only on a fresh machine or a cache miss.</td>
+          </tr>
+          <tr>
+            <td>Warm daily run</td>
+            <td class="num">2&ndash;4 min</td>
+            <td>What you&rsquo;d actually schedule.</td>
+          </tr>
+          <tr>
+            <td>Cold run</td>
+            <td class="num">10&ndash;15 min</td>
+            <td>First run anywhere, and after a cache eviction.</td>
+          </tr>
+          <tr>
+            <td>ARM wheels for deps</td>
+            <td class="num">all present</td>
+            <td>Checked on PyPI: every dependency ships aarch64 or is pure Python.</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="callout">
+      <p>
+        <strong>The 20&nbsp;KB is the whole reason this is easy.</strong> The one
+        file that cannot be rebuilt from source data is
+        <code>prediction_history.parquet</code> &mdash; it records what the model
+        believed <em>before</em> each game was played. It is 20&nbsp;KB and
+        already versioned in git. Every other byte can be re-downloaded. Whatever
+        you pick, you are not at risk of losing anything important.
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <h2>The options in full</h2>
+
+    <div class="option">
+      <h3>GitHub Actions</h3>
+      <span class="verdict good">Least effort &middot; no bot</span>
+      <p>
+        A scheduled workflow on GitHub&rsquo;s runners. You already have
+        <code>.github/workflows/tests.yml</code> working, so the mechanism is
+        proven here. Free and unlimited because the repo is public.
+      </p>
+      <p>
+        It fits unusually well because the state problem &mdash; the hard part of
+        automating anything &mdash; is 20&nbsp;KB of git-tracked Parquet. The
+        workflow commits the log back after each run, so you get a versioned
+        history of every prediction as a side effect. That is strictly better
+        than a local file you could overwrite.
+      </p>
+      <p>
+        The three gaps in the current setup map onto built-in features rather
+        than code: a <code>concurrency</code> group replaces the lockfile,
+        failure email plus an <code>if: failure()</code> webhook step covers
+        notification, and only the MoneyPuck download needs retry logic since
+        everything else is idempotent. <code>actions/cache</code> holds the
+        451&nbsp;MB, well inside the free 10&nbsp;GB.
+      </p>
+      <div class="catch">
+        <span class="label">What you accept</span>
+        <p>
+          <strong>Scheduled runs are queued, not punctual.</strong> Free-tier
+          crons typically fire 5&ndash;20 minutes late and occasionally worse.
+          Schedule with margin &mdash; 21:00&nbsp;UTC leaves about two hours
+          before puck drop.
+        </p>
+        <p>
+          GitHub disables schedules after 60 days of repository inactivity, which
+          solves itself here since the workflow commits daily. The cache evicts
+          after 7 unused days; daily runs keep it warm, and a miss just costs one
+          slow run. And no slash commands, ever.
+        </p>
+      </div>
+    </div>
+
+    <div class="option">
+      <h3>Oracle Cloud Always Free</h3>
+      <span class="verdict warn">Most capable &middot; hardest to obtain</span>
+      <p>
+        An always-on Linux VM you own. The headline allowance is
+        <strong>4 OCPUs and 24&nbsp;GB RAM</strong> on Ampere ARM, splittable
+        across up to four instances, free with no expiry. An OCPU is a full
+        physical core, not a hyperthread, so that is genuinely four cores. No
+        other major cloud&rsquo;s free tier is within an order of magnitude.
+      </p>
+      <p>
+        Alongside it: 200&nbsp;GB block storage, 20&nbsp;GB object storage and
+        10&nbsp;TB/month egress. Your entire project is 451&nbsp;MB, so you would
+        use a rounding error of the storage.
+      </p>
+      <p>
+        For this project it does all three things &mdash; the daily cron, the
+        Discord bot as a systemd unit, and Postgres properly, so the
+        <code>DATABASE_URL</code> path stops being the optional branch it is
+        today. Cron on your own box also means 17:00 means 17:00. And with four
+        cores you can retrain there too, which sidesteps the pickle-version
+        problem below entirely.
+      </p>
+      <div class="catch">
+        <span class="label">What you accept</span>
+        <p>
+          <strong>Getting an Ampere instance is the real hurdle.</strong>
+          &ldquo;Out of host capacity&rdquo; is a long-running, widely-reported
+          frustration; popular regions can be dry for days. Mitigations: choose a
+          less-saturated home region at signup, script the create call and retry
+          on a loop, try off-peak. Budget more than one sitting. Your home region
+          is fixed at signup and Always Free resources only live there, so choose
+          deliberately.
+        </p>
+        <p>
+          <strong>Idle instances can be reclaimed.</strong> Roughly: over a 7-day
+          window, CPU 95th-percentile under 20% with low network and memory. A
+          bot plus one daily job may well look idle by that standard. The usual
+          fix is upgrading to Pay As You Go &mdash; Always Free resources stay
+          free and PAYG accounts are exempt &mdash; but that means a card on file
+          and real exposure if you provision past the free limits. Set a budget
+          alert at $1 the same day if you go that route.
+        </p>
+        <p>
+          A credit card is required at signup even for Always Free, and free
+          resources carry no SLA. Verify the current allowances on Oracle&rsquo;s
+          page before committing; these figures are from training data, not from
+          checking today.
+        </p>
+      </div>
+    </div>
+
+    <div class="option">
+      <h3>Your PC, via Task Scheduler</h3>
+      <span class="verdict good">Working tonight &middot; least durable</span>
+      <p>
+        The data is already here, the environment already works, and Windows Task
+        Scheduler can wake the machine for a task. Setup is one scheduled task
+        and, if you want the bot, one startup entry. Nothing new to learn and
+        nothing that can be reclaimed by a cloud provider.
+      </p>
+      <p>
+        The honest case for this is that it is reversible. Run it for a month,
+        find out whether you actually use the slash commands, then move to
+        something else knowing what you need.
+      </p>
+      <div class="catch">
+        <span class="label">What you accept</span>
+        <p>
+          The machine has to be awake at the scheduled time every day, and there
+          is no failure notification unless you build one &mdash; a silent
+          failure looks identical to a quiet night with no games. If the pipeline
+          stops, you find out when you notice the channel has gone quiet.
+        </p>
+      </div>
+    </div>
+
+    <div class="option">
+      <h3>Raspberry Pi</h3>
+      <span class="verdict warn">Always-on you control</span>
+      <p>
+        Always-on, low power, no provider who can reclaim it. Correcting
+        something I said earlier: the ARM concern was wrong. Every dependency
+        &mdash; scikit-learn, XGBoost, LightGBM, pyarrow, SciPy &mdash; ships
+        aarch64 wheels or is pure Python, so the install is unremarkable.
+      </p>
+      <div class="catch">
+        <span class="label">What you accept</span>
+        <p>
+          RAM is the real constraint if you ever want it to <em>train</em> rather
+          than just serve &mdash; the feature matrix is 6,877&nbsp;&times;&nbsp;295
+          and the tuning runs are heavier still. Serving a pickle is comfortable
+          on any recent Pi; retraining is not what the hardware is for.
+        </p>
+        <p>
+          It is also another physical box to patch and keep online, for capability
+          Oracle gives free. Worth it mainly if you want the hardware anyway or
+          prefer nothing running in someone else&rsquo;s cloud.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <section>
+    <h2>One thing that applies to every remote option</h2>
+    <p>
+      Model pickles are version-sensitive. Train with one scikit-learn on Windows
+      and load with another on Linux, and joblib will warn or fail outright. Two
+      ways out: pin exact versions in <code>requirements.txt</code>, or train on
+      the same box that serves. Oracle can do the latter comfortably; a Pi
+      cannot; Actions would need the pinning.
+    </p>
+  </section>
+
+  <section>
+    <h2>How I&rsquo;d decide</h2>
+    <p>
+      Answer one question first: <strong>do you want the slash commands, or are
+      scheduled webhook posts enough?</strong>
+    </p>
+    <ul>
+      <li>
+        <strong>Webhook posts are enough</strong> &rarr; GitHub Actions. It is
+        free, needs no machine, cannot be reclaimed, and the failure notification
+        you are missing is a built-in feature rather than something to build.
+      </li>
+      <li>
+        <strong>You want the bot answering on demand</strong> &rarr; Oracle, with
+        your PC as the stopgap while you fight for an instance. Oracle then runs
+        the cron, the bot and Postgres, and the punctuality is a real bonus over
+        Actions&rsquo; queue.
+      </li>
+      <li>
+        <strong>You want to decide by using it</strong> &rarr; Task Scheduler
+        this week. It costs an hour, tells you whether the slash commands matter
+        to you, and throws nothing away.
+      </li>
+    </ul>
+    <p>
+      Given that you want a box for other things regardless, Oracle is the better
+      single answer &mdash; it covers all three jobs where Actions covers one.
+      The counterargument is purely operational: Actions is zero-maintenance and
+      cannot be taken away, and a VM is a thing you own and patch forever.
+    </p>
+
+    <div class="callout">
+      <p>
+        <strong>Most of the work is portable.</strong> The systemd unit for the
+        bot, the cron entry, the lockfile and the failure-notification hook are
+        identical on Oracle, a Pi, or any other Linux host. Only the GitHub
+        Actions path is genuinely different. So the decision can be deferred
+        without deferring the work &mdash; and if the answer turns out to be
+        Actions, the workflow is short.
+      </p>
+    </div>
+  </section>
+
+  <footer>
+    NHLAnalyzer &middot; measured 29 August 2026 &middot; 305 tests passing &middot;
+    season opens 2026-10-05
+  </footer>
+
+</div>
