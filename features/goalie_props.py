@@ -48,6 +48,75 @@ OPP_TEAM_COLS = ["xg_for_l20", "hd_chances_for_l20", "sf_pct_l20"]
 MIN_STARTS = 5
 
 
+# How many of a team's most recent starts the probable-starter rule looks at.
+# Scored against the boxscore ``starter`` flag over 13,594 starts
+# (``data/parquet/goalie_starts.parquet``):
+#
+#   whoever started last      45.6%
+#   most common of last 3     55.7%
+#   most common of last 5     58.2%
+#   most common of last 10    59.7%   <- chosen
+#   most common of last 20    58.9%
+#   season-to-date leader     58.5%
+#
+# "Whoever started last" is worse than a coin flip because tandems alternate:
+# the busiest goalie takes only 60.2% of his team's starts, so the previous
+# game is nearly as much evidence against him going again as for it.  Past ten
+# starts the window drifts, picking up goalies since traded or sent down.
+STARTER_WINDOW = 10
+
+
+def likely_starters(
+    starts: pd.DataFrame,
+    teams: Optional[list[str]] = None,
+    window: int = STARTER_WINDOW,
+) -> dict[str, dict]:
+    """Guess each team's starter from its recent starts.
+
+    Shared by both serving paths so they cannot drift apart: the outcome model
+    needs a goalie to read rolling save stats off, and the saves prop needs one
+    to project.  Neither can know the real answer -- the NHL publishes no
+    probable starter before puck drop, and the boxscore ``starter`` flag only
+    appears once the game is live.
+
+    Args:
+        starts: starter rows with ``team``, ``season``, ``game_num`` and a
+                goalie identifier.  Accepts ``goalie_id``/``goalie_name`` or
+                ``player_id``/``player_name``.
+        teams:  restrict to these teams; default is every team present.
+        window: how many recent starts to count over.
+
+    Returns:
+        ``{team: {goalie_id, goalie_name, team, starter_basis,
+        starter_confidence}}``.  Teams with no history are omitted rather than
+        guessed at.
+    """
+    id_col = "goalie_id" if "goalie_id" in starts.columns else "player_id"
+    name_col = "goalie_name" if "goalie_name" in starts.columns else "player_name"
+
+    wanted = teams if teams is not None else sorted(starts["team"].dropna().unique())
+    out: dict[str, dict] = {}
+    for team in wanted:
+        played = starts[starts["team"] == team]
+        if played.empty:
+            logger.warning("No goalie history for %s -- no projection", team)
+            continue
+
+        recent = played.sort_values(["season", "game_num"]).tail(window)
+        counts = recent[id_col].value_counts()
+        goalie_id = int(counts.idxmax())
+        row = recent[recent[id_col] == goalie_id].iloc[-1]
+
+        out[team] = {
+            "goalie_id":   goalie_id,
+            "goalie_name": row[name_col],
+            "team":        team,
+            "starter_basis": f"{int(counts.max())} of last {len(recent)} starts",
+            "starter_confidence": float(counts.max() / len(recent)),
+        }
+    return out
+
+
 def rolling_feature_columns() -> list[str]:
     """The rolling columns :func:`_rolling_goalie` produces."""
     return [f"{c}_l{w}" for c in GOALIE_ROLL_STATS for w in GOALIE_PROP_WINDOWS]

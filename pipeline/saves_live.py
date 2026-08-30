@@ -30,6 +30,8 @@ from dotenv import load_dotenv
 
 from config.season import current_season
 from features.goalie_props import (
+    likely_starters,
+    STARTER_WINDOW,
     MIN_STARTS,
     OPP_TEAM_COLS,
     OWN_TEAM_COLS,
@@ -49,60 +51,23 @@ PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
 MIN_FEATURE_COVERAGE = 0.70
 
 
-# How many of a team's most recent starts the probable-starter rule looks at.
-# Scored against the boxscore ``starter`` flag over 13,594 starts:
-#
-#   last start                45.6%
-#   most common of last 3     55.7%
-#   most common of last 5     58.2%
-#   most common of last 10    59.7%   <- chosen
-#   most common of last 20    58.9%
-#   season-to-date leader     58.5%
-#
-# "Whoever started last" is worse than a coin flip because tandems alternate:
-# the busiest goalie takes only 60% of his team's starts, so the previous game
-# is evidence *against* him going again as often as it is evidence for.
-# Widening the window past 10 starts drifts, picking up goalies since traded
-# or sent down.
-STARTER_WINDOW = 10
-
-
 def probable_starters(history: pd.DataFrame, teams: list[str]) -> dict[str, dict]:
     """Each team's likeliest starter, as a stand-in for a confirmed one.
 
     The NHL API does not publish a probable starter before puck drop -- checked
-    against a scheduled game: the pre-game boxscore has no player stats at all,
-    ``right-rail`` reports empty scratches until the lineup is filed, and
-    ``landing.matchup.goalieComparison`` lists the tandem ranked on *last*
-    season's numbers rather than naming a starter.  The ``starter`` flag only
-    appears once the game is live, which is after bet time.
+    against a scheduled game rather than assumed: the pre-game boxscore has no
+    player stats at all, ``right-rail`` reports empty scratches until the
+    lineup is filed, and ``landing.matchup.goalieComparison`` lists the tandem
+    ranked on *last* season's numbers without naming a starter.  The ``starter``
+    flag only appears once the game is live, which is after bet time.
 
     So this infers, and the inference is the weakest link in the saves model.
-    Every row carries ``starter_basis`` saying so.
+    Every row carries ``starter_basis`` saying so.  The rule and the evidence
+    behind it live in :func:`features.goalie_props.likely_starters`, shared
+    with the outcome pipeline so the two cannot pick different goalies for the
+    same game.
     """
-    starters: dict[str, dict] = {}
-    for team in teams:
-        played = history[history["team"] == team]
-        if played.empty:
-            logger.warning("No goalie history for %s -- no projection", team)
-            continue
-
-        recent = played.sort_values(["season", "game_num"]).tail(STARTER_WINDOW)
-        counts = recent["goalie_id"].value_counts()
-        goalie_id = int(counts.idxmax())
-        row = recent[recent["goalie_id"] == goalie_id].iloc[-1]
-        share = counts.max() / len(recent)
-
-        starters[team] = {
-            "goalie_id":   goalie_id,
-            "goalie_name": row["goalie_name"],
-            "team":        team,
-            "starter_basis": (
-                f"{int(counts.max())} of last {len(recent)} starts"
-            ),
-            "starter_confidence": float(share),
-        }
-    return starters
+    return likely_starters(history, teams)
 
 
 def _team_context(target_season: Optional[str] = None) -> pd.DataFrame:

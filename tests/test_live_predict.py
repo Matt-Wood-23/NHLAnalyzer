@@ -79,3 +79,90 @@ class TestNoMutation:
         cols_before = list(trimmed.columns)
         predict(trimmed, model, FEATURES, min_coverage=0.0)
         assert list(trimmed.columns) == cols_before
+
+
+class TestHistoryWriteGuard:
+    """--dry-run used to append to the prediction log anyway."""
+
+    def test_dry_run_and_history_are_separate_flags(self):
+        import inspect
+        from pipeline import live
+        params = inspect.signature(live.run).parameters
+        assert "dry_run" in params and "save_history" in params
+
+    def test_dry_run_defaults_to_writing_nothing(self):
+        """The intuitive meaning of the flag, and what the CLI implies."""
+        import inspect
+        from pipeline import live
+        src = inspect.getsource(live.run)
+        assert "save_history = not dry_run" in src
+
+    def test_the_daily_pipeline_still_logs_predictions(self):
+        """pipeline.daily passed dry_run=True meaning "skip Postgres" while
+        relying on the history being written anyway.  Making dry_run mean
+        "write nothing" would have silently stopped the daily loop recording
+        anything, which /yesterday and the CLV scoring both read back."""
+        import inspect
+        from pipeline import daily
+        src = inspect.getsource(daily.run_predictions)
+        assert "save_history=True" in src
+
+    def test_the_history_writer_is_reached_through_the_guard(self):
+        import inspect
+        from pipeline import live
+        src = inspect.getsource(live.run)
+        before = src.index("if save_history:")
+        call = src.index("save_prediction_history(predictions")
+        assert call > before, "history is written before the guard is consulted"
+
+
+class TestSnapshotSeasonScoping:
+    """Training resets some rolling features at the season boundary and not
+    others.  The live snapshots have to match, feature by feature."""
+
+    def test_special_teams_and_opponent_quality_take_a_season(self):
+        import inspect
+        from pipeline import live
+        for fn in (live._build_special_teams_snapshot,
+                   live._build_opponent_quality_snapshot):
+            assert "season" in inspect.signature(fn).parameters, fn.__name__
+
+    def test_they_actually_filter_on_it(self):
+        import inspect
+        from pipeline import live
+        assert 'st_games["season"] == season' in inspect.getsource(
+            live._build_special_teams_snapshot)
+        assert 'fm["season"] == season' in inspect.getsource(
+            live._build_opponent_quality_snapshot)
+
+    def test_the_goalie_snapshot_is_deliberately_not_scoped(self):
+        """features.goalie_mp rolls per goalie with no season reset, so
+        scoping here would feed the model something it never trained on."""
+        import inspect
+        from features import goalie_mp
+        assert "across seasons" in inspect.getsource(
+            goalie_mp.compute_goalie_rolling_features)
+
+    def test_rest_is_deliberately_not_scoped(self):
+        """features.context computes rest with groupby("team") alone, so on
+        opening night training saw ~180 days.  Scoping would be the bug."""
+        import inspect
+        from pipeline import live
+        assert "not* scoped" in inspect.getsource(live._team_last_game_date)
+
+    def test_the_goalie_snapshot_picks_the_likely_starter(self):
+        """It used to sort by goalie_id and take iloc[-1], which is the
+        highest goalie_id's last start -- not the team's most recent."""
+        import inspect
+        from pipeline import live
+        src = inspect.getsource(live._build_goalie_snapshot)
+        assert "likely_starters" in src
+        assert "grp.iloc[-1]" not in src
+
+    def test_both_pipelines_share_one_starter_rule(self):
+        """If they drift, the outcome model and the saves prop can put
+        different goalies in net for the same game."""
+        import inspect
+        from pipeline import live, saves_live
+        assert "likely_starters" in inspect.getsource(live._build_goalie_snapshot)
+        assert "likely_starters" in inspect.getsource(saves_live.probable_starters)

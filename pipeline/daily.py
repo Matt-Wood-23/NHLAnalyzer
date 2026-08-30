@@ -96,7 +96,13 @@ def run_predictions(target_date, model_name="random_forest", conn=None):
     preds = live_run(
         target_date=target_date,
         model_name=model_name,
-        dry_run=True,  # don't save to DB, history is saved inside run()
+        # Skip the Postgres write, but this is the real daily run, so the
+        # prediction history must still be logged -- it is what /yesterday and
+        # the CLV scoring read back.  These were one flag until dry_run was
+        # made to mean "write nothing", which silently would have stopped the
+        # daily loop recording anything.
+        dry_run=True,
+        save_history=True,
         conn=conn,
     )
 

@@ -36,6 +36,7 @@ from features.goalie_mp import GOALIE_WINDOWS
 from features.special_teams import ST_WINDOWS
 from features.context import _DIVISIONS, _CONFERENCES
 from ingestion.nhl_api import fetch_schedule
+from features.goalie_props import likely_starters
 from config.season import approximate_game_date, current_season, season_start, game_number
 from pipeline.evaluate_history import HISTORY_PATH
 
@@ -134,10 +135,34 @@ def _build_goalie_snapshot() -> pd.DataFrame:
                 .transform(lambda s: s.shift(1).rolling(w, min_periods=1).mean())
             )
 
-    # For each team, take the most recent starter
+    # Pick tonight's likely starter per team, then read his rolling stats.
+    #
+    # This used to sort by ("goalie_id", "season", "game_num") and take the
+    # last row of each team group -- which is the highest goalie_id's final
+    # start, not the team's most recent one.  For BOS in 2025-26 that served
+    # Swayman's numbers on a night Korpisalo had started last.
+    #
+    # It also used "whoever started last", which scores 45.6% against the
+    # boxscore starter flag.  likely_starters is the same rule the saves prop
+    # uses (59.7%), shared so the two pipelines cannot disagree about who is
+    # in net for the same game.
+    #
+    # The rolling values deliberately span seasons: features.goalie_mp rolls
+    # per goalie with no season reset, so a snapshot that reset here would
+    # feed the model something it never trained on.
+    likely = likely_starters(starters, teams=None)
+
+    latest = (
+        starters.sort_values(["season", "game_num"])
+        .drop_duplicates(subset=["goalie_id"], keep="last")
+        .set_index("goalie_id")
+    )
+
     rows = []
-    for team, grp in starters.groupby("team"):
-        last = grp.iloc[-1]
+    for team, pick in likely.items():
+        if pick["goalie_id"] not in latest.index:
+            continue
+        last = latest.loc[pick["goalie_id"]]
         row = {"team": team}
         for col in roll_cols:
             for w in GOALIE_WINDOWS:
@@ -153,7 +178,7 @@ def _build_goalie_snapshot() -> pd.DataFrame:
 # Special teams snapshot (rolling PP/PK per team)
 # ---------------------------------------------------------------------------
 
-def _build_special_teams_snapshot() -> pd.DataFrame:
+def _build_special_teams_snapshot(season: Optional[str] = None) -> pd.DataFrame:
     """
     Return one row per team with rolling PP/PK stats.
     Recomputes from raw MoneyPuck data cached during backfill.
@@ -170,6 +195,19 @@ def _build_special_teams_snapshot() -> pd.DataFrame:
 
     st_games = aggregate_special_teams_stats()
     if st_games.empty:
+        return pd.DataFrame()
+
+    # features.special_teams rolls within (team, season), so a snapshot that
+    # reached back across the boundary would serve last season's finishing
+    # PP/PK in October -- values the model never saw at that point in a season.
+    # Scope to the season being played and let October be NaN, which is what
+    # training looked like on opening night.
+    season = season or CURRENT_SEASON
+    st_games = st_games[st_games["season"] == season]
+    if st_games.empty:
+        logger.warning(
+            "No special-teams games for %s yet -- ST features will be NaN", season,
+        )
         return pd.DataFrame()
 
     st_games = st_games.sort_values(["team", "season", "game_num"])
@@ -226,7 +264,7 @@ def _build_elo_snapshot() -> pd.DataFrame:
 # Opponent quality snapshot (rolling stats vs strong/weak opponents)
 # ---------------------------------------------------------------------------
 
-def _build_opponent_quality_snapshot() -> pd.DataFrame:
+def _build_opponent_quality_snapshot(season: Optional[str] = None) -> pd.DataFrame:
     """
     Return one row per team with opponent-quality-adjusted rolling stats.
     Uses the feature matrix built during backfill — extracts the latest
@@ -243,6 +281,18 @@ def _build_opponent_quality_snapshot() -> pd.DataFrame:
     oq_cols = [c for c in fm.columns if "_vs_strong_" in c or "_vs_weak_" in c]
     if not oq_cols:
         return pd.DataFrame()
+
+    # features.opponent_quality rolls within (team, season); same reasoning as
+    # the special-teams snapshot above.
+    season = season or CURRENT_SEASON
+    if "season" in fm.columns:
+        fm = fm[fm["season"] == season]
+        if fm.empty:
+            logger.warning(
+                "No games for %s yet -- opponent-quality features will be NaN",
+                season,
+            )
+            return pd.DataFrame()
 
     # Get home/away oq columns from the latest game per team
     home_oq = [c for c in oq_cols if c.startswith("home_")]
@@ -275,7 +325,13 @@ def _team_last_game_date(
     parquet_path: Optional[Path] = None,
     conn=None,
 ) -> dict[str, date]:
-    """Return {team: last_completed_game_date}."""
+    """Return {team: last_completed_game_date}.
+
+    Deliberately *not* scoped to the current season.  features.context computes
+    rest with ``groupby("team")["date"].shift(1)`` -- team only, no season
+    reset -- so on opening night training saw roughly 180 days of rest, and the
+    live path has to say the same thing.  Scoping this would be the bug.
+    """
     if conn is not None:
         try:
             sql = """
@@ -712,6 +768,7 @@ def run(
     dry_run: bool = False,
     conn=None,
     min_coverage: float = MIN_FEATURE_COVERAGE,
+    save_history: Optional[bool] = None,
 ) -> pd.DataFrame:
     """
     Full live prediction pipeline.
@@ -785,8 +842,26 @@ def run(
     #     reconstructed later.
     predictions = attach_market_prices(predictions, target_date)
 
-    # 6. Always save prediction history (Parquet)
-    save_prediction_history(predictions, model_name, target_date)
+    # 6. Save prediction history (Parquet)
+    #
+    # dry_run now covers this.  It used to guard only the Postgres write below,
+    # so --dry-run appended to prediction_history.parquet -- the one file in
+    # the repo that cannot be rebuilt from source data, because it records what
+    # the model believed *before* the games were played.  Anyone exercising the
+    # pipeline was quietly writing to it.
+    #
+    # pipeline.daily was relying on that: it passed dry_run=True meaning "skip
+    # Postgres" while still wanting the history logged, which is why the two
+    # are now separate flags rather than one doing double duty.
+    if save_history is None:
+        save_history = not dry_run
+    if save_history:
+        save_prediction_history(predictions, model_name, target_date)
+    else:
+        logger.info(
+            "Dry run -- not writing %d prediction(s) to the history log",
+            len(predictions),
+        )
 
     # 6b. Optionally save to DB
     if not dry_run and conn is not None:
