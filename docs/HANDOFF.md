@@ -11,7 +11,8 @@ was written before any of it had touched real data — see
 **Session 5** ([below](#session-5--opening-week-30-september-2026)) is the
 first with the season under way, and it found that three of the five live
 snapshots had been serving stale features all along. Read it before trusting
-anything Sessions 1-4 say about train/serve parity. 393 tests passing.
+anything Sessions 1-4 say about train/serve parity. It also found that the
+win label itself was wrong on 3.5% of games (section 27). 430 tests passing.
 
 ---
 
@@ -1042,11 +1043,142 @@ added.** Nothing run now can reconstruct what the model would have said.
   `data/cache/boxscores/` carries `gameDate`. A `game_dates.parquet` built
   alongside the spine would make the pipeline self-contained and fill the ~350
   playoff games from 2021-24 that have no date in Postgres.
-- **Retrain is due.** The matrix has grown by a season since the saved model
-  was fitted, and the two training-side issues above (opponent-strength
-  look-ahead, the head-to-head definition) can only be fixed with one.
-- **Feature selection.** See the ELO-only comparison in section 21.
+- ~~Retrain is due.~~ Done, section 28. The reason first given here was
+  wrong: the saved model was fitted on 28 August with all of 2025-26 in it.
+- ~~Feature selection.~~ Measured, section 29. It does not help.
 - **Source-text tests.** `tests/test_live_predict.py` still has several that
   assert a string appears in a function. Each is a candidate for the kind of
   miss in section 22.
 - Everything under "Open items after Session 4" still stands.
+
+## 27. The win label was wrong on 3.5% of games
+
+Found on 1 October while retraining: the walk-forward showed home teams
+winning 50.1% of the time. The league figure is about 54%.
+
+`features/team.py` computed `won = goals_for > goals_against` from MoneyPuck's
+shot totals. Those contain no shootout, so a shootout game is level in the
+data and the comparison is false for **both** teams. Each was recorded as
+having lost.
+
+    games level in the shot data            481   (471 flagged SO by the boxscore)
+    home wins labelled as home losses       243   (3.53% of the matrix)
+    target mean, shot totals              0.5017
+    target mean, official                 0.5370
+
+Everything downstream inherited it: the training target, the `won_*` rolling
+features, the opponent-quality `won_vs_*` features, ELO updates (a home
+shootout win scored as an away overtime win), the stored outcomes in the
+prediction log, and `/recap`.
+
+`ingestion.boxscore.build_game_results` now parses the official result from
+the cached boxscores — score including the shootout goal, last period type,
+date — into `game_results.parquet`. No database needed. `apply_official_results`
+overrides `won` inside `_add_derived_columns`, which both training and the
+live snapshot call. `pipeline.daily` refreshes the file before the matrix.
+
+Cross-checks: the boxscore home/away matches MoneyPuck on all 6,884 games;
+where the shot data has a winner (6,403 games) it matches the official one
+every time; results agree with Postgres on 6,883 (the one difference is a
+Postgres error on `2024020002`, a 3-1 home win stored as a loss); and dates
+agree on all 6,533 games Postgres has a date for.
+
+Walk-forward, both scored against official results:
+
+| Trained on | Brier | mean predicted home win | actual |
+|:--|--:|--:|--:|
+| shot-total labels | 0.2421 | 0.502 | 0.536 |
+| official labels | 0.2412 | 0.539 | 0.536 |
+
+Brier moves by −0.0009 ± 0.0006. The 3.4-point bias is the part that matters:
+against a market that prices home ice correctly, every "edge" the model
+reported leaned toward the road team.
+
+**The prediction log was re-scored.** 7 of its 179 scored games were home
+shootout wins stored as losses. Only `actual_home_win`, `correct` and `brier`
+changed; probabilities, timestamps and prices are untouched. Last spring's
+record is 57.0% / Brier 0.2347, not the 54.2% / 0.2403 previously reported.
+`load_outcomes` now prefers official results over the matrix target.
+
+**ELO parameters were left alone.** They were tuned on the bad labels and all
+four sat on the edge of the grid, so a 600-point grid was re-run on official
+results. The surface is flat (0.2393 best, 0.2400 current) and on a held-out
+2025-26 the current parameters do slightly *better* than the re-tuned ones.
+Not evidence enough to change them. Home advantage does want to be about 26
+rather than 30, which is the grid minimum; immaterial.
+
+**`game_results.parquet` also carries every game date**, including the ~350
+playoff games Postgres has none for. That is the "game dates should not need a
+database" item above, three-quarters built: `features/context.py` and
+`_team_last_game_date` would need to read it instead of Postgres.
+
+## 28. The retrain
+
+`models/saved/random_forest.pkl` was refitted on 6,884 games with official
+labels. Same configuration, same 287 features.
+
+What the retrain was actually for, since the reason first given was wrong:
+
+1. The saved model was fitted on 28 August, the day *before* the sort-key fix
+   (section 13). It learned from rolling features computed under the leaky
+   playoff ordering and has been served the corrected ones since. Against a
+   refit on the same rows it differed by 1.3 points on average, 7.3 at most,
+   and picked the other side in 6.1% of games.
+2. The labels (section 27).
+3. The opponent-strength look-ahead from section 22. Opponents are now strong
+   or weak against `STRONG_OPPONENT_ELO` (1500, the league mean by
+   construction) rather than a whole-season median. Walk-forward effect
+   +0.00005 ± 0.00019: nothing, as expected. Adopted because it is knowable on
+   the day and identical in training and serving.
+
+Head-to-head was left as trained. The reoriented version correlates better
+with the result (+0.089 against −0.039) but changes the forest's score by
+−0.00001 ± 0.00003. No reason to touch live code for that.
+
+The SOG and saves models were not retrained. Both were fitted on 29 August
+after the sort-key fix, and neither uses `won`.
+
+Tomorrow's slate under the old and new model, same live features: every home
+probability rises, by 2.6 points on average.
+
+## 29. The model is ELO
+
+Measured while the harness was up. Walk-forward, official labels, 5,477 games:
+
+| Model | Brier | vs the forest |
+|:--|--:|--:|
+| always the home-win rate | 0.2489 | |
+| RF, 287 features (production) | 0.2412 | |
+| LR on `diff_elo` alone | 0.2404 | −0.0008 ± 0.0011 |
+| ELO's own formula, no fitting | 0.2400 | |
+| RF, top-20 chosen per fold | — | +0.0001 ± 0.0005 |
+| LR, all 287 | 0.2609 | +0.0185 ± 0.0021 |
+
+(The top-k and LR-287 rows were measured before the label fix; the comparison
+within each row is like for like.)
+
+The other 286 features add nothing measurable to ELO. The README's "0.2404
+with top-20 selection" came from `run_feature_selection`, which ranks features
+on every season and then tests on those same seasons.
+
+This is the thing to decide about, not a thing to fix. A market that prices
+injuries, starters and travel will beat an ELO model, so whatever edge this
+project finds has to come from information the rolling features do not carry:
+confirmed starters, lineup changes, schedule spots. None of that is built.
+
+## Open items after the retrain
+
+- **Nothing is automated and no bot is running.** Checked 1 October: no
+  scheduled task, no `bot.discord_bot` process. The log only records games
+  predicted before puck drop.
+- **The log has never recorded a price at prediction time.** `market_prob_home`
+  is empty on all 181 rows; closing prices were backfilled on 91. CLV proper
+  starts with the first run made before puck drop this season.
+- **`python -m bot.discord_bot --webhook` writes the log too** (`dry_run=False`),
+  so run after `pipeline.daily` it replaces that morning's row with a later
+  price. Harmless if only one of the two is used; decide which is canonical.
+- **Model choice** (section 29).
+- **Game dates from `game_results.parquet`** (section 27).
+- `saves_live` still prints "Starters are the last goalie each team started";
+  the rule has been most-common-of-last-10 since section 14.
+

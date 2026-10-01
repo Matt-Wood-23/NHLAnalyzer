@@ -8,13 +8,16 @@ Before each NHL game, the system looks at how both teams have been playing recen
 
 ## How Good Is It?
 
-The best model correctly picks the winner **~57.5% of the time** with a Brier score of **0.2404**. For context:
+The model the bot serves picks the winner **57.8% of the time** with a Brier score of **0.2412**, measured walk-forward over 5,477 games (2022-23 to 2025-26) against official results. For context:
 
+- **Always picking the home team** would be right 53.6% of the time (Brier = 0.2489) — this, not the coin flip, is the baseline to beat
 - **A coin flip** would be right 50% of the time (Brier = 0.2500)
 - **Vegas sportsbooks** are right roughly 58-60% of the time
 - **The theoretical best** anyone could do for NHL is probably around 60-62%, because hockey has more randomness (parity) than most other sports
 
 So the model is meaningfully better than guessing but still below the sharpest sportsbooks — which is expected, since books have access to injury reports, lineup data, and market-driven information that this model doesn't use.
+
+Two things to know about that number. Almost all of it is ELO: a logistic regression on the ELO difference alone scores 0.2404 over the same games, which is not distinguishable from the 287-feature forest (difference 0.0008 ± 0.0011). And earlier versions of this README quoted 0.2404 as the "best model" from an XGBoost run with top-20 feature selection; that ranking was computed on all seasons including the ones it was then tested on. Choosing the features inside each fold shows no gain on the forest (+0.0001 ± 0.0005).
 
 ---
 
@@ -39,7 +42,7 @@ The main metric. It measures how **calibrated** the probabilities are — not ju
 | 0.2300 | Exceptional — approaching the limits of prediction |
 | 0.0000 | Perfect (impossible in practice) |
 
-Our best model: **0.2404**
+The production model: **0.2412** (no-skill baseline 0.2489)
 
 ### AUC (Area Under the ROC Curve) — higher = better
 
@@ -143,7 +146,9 @@ Similar to XGBoost but uses a different algorithm for building trees. Faster to 
 Instead of just averaging model predictions, we train a logistic regression to learn the **optimal blend** of RF, XGB, and LightGBM outputs. In practice, the meta-learner learned to mostly trust RF and XGB while nearly ignoring LightGBM.
 
 ### Feature Selection
-More features isn't always better. With 290 features, many are noise that confuses the model. By keeping only the **top 20 most important features**, XGBoost's Brier score improved from 0.2416 to 0.2404. Less noise = better predictions.
+More features isn't always better. With 290 features, many are noise that confuses the model. By keeping only the **top 20 most important features**, XGBoost's Brier score improved from 0.2416 to 0.2404.
+
+That result does not hold up. `run_feature_selection` ranks features with a forest trained on *every* season and then walk-forwards over those same seasons, so the ranking has already seen the test games. Ranked inside each fold instead, top-10/20/50/100 are all within noise of using everything.
 
 ### Calibration
 "Calibration" means adjusting the raw model probabilities so they match reality. If the model says "60% chance" for 100 games, roughly 60 of those games should actually be wins.
@@ -237,6 +242,17 @@ Published is not endorsed: walk-forward Brier on first games is 0.2456
 against 0.2496 for the base rate (n = 78, difference −0.004 ± 0.010). That is
 no measurable skill, and those predictions barely leave 50%. Filter them out
 of any evaluation by `feature_coverage`.
+
+### Wins come from the official result
+
+`won`, the training target and the scoring of the prediction log all read
+`game_results.parquet`, parsed from the NHL boxscores. They used to be
+`goals_for > goals_against` on MoneyPuck's shot totals, which contain no
+shootout — so a shootout game was tied in the data and *both* teams were
+recorded as losing. Every home shootout win was a home loss in the target:
+243 games, 3.5% of the matrix, all one way. The matrix said home teams win
+50.2%; the league says 53.7%, and the model under-rated every home team by
+the difference.
 
 ### Games that have started are shown, never logged
 

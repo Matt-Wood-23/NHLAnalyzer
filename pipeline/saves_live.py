@@ -274,5 +274,5 @@ if __name__ == "__main__":
         print(f"\nGoalie Saves Projections -- {target}")
         print("=" * 96)
         print(preds.to_string(index=False))
-        print("\nStarters are the last goalie each team started, not a "
-              "confirmed lineup. Check before acting on a back-to-back.")
+        print("\nStarters are each team's most frequent of its last 10 starts, "
+              "not a confirmed lineup. Check before acting on a back-to-back.")

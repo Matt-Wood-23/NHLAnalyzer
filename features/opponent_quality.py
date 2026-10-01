@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from features.elo import compute_elo_ratings, load_elo_params
+from features.elo import INITIAL_ELO, compute_elo_ratings, load_elo_params
 
 logger = logging.getLogger(__name__)
 
@@ -25,6 +25,9 @@ PARQUET_DIR = Path(__file__).parent.parent / "data" / "parquet"
 OQ_WINDOWS = [20]  # longer window — opponent splits are sparser
 OQ_STATS = ["xgf_pct", "cf_pct", "won", "goal_diff"]
 
+# An opponent rated at or above the league mean counts as strong.
+STRONG_OPPONENT_ELO = INITIAL_ELO
+
 
 def compute_opponent_quality_features(
     team_features: pd.DataFrame,
@@ -32,7 +35,7 @@ def compute_opponent_quality_features(
     save_intermediate: bool = False,
 ) -> pd.DataFrame:
     """
-    Compute rolling stats split by opponent quality (above/below median ELO).
+    Compute rolling stats split by opponent quality (above/below mean ELO).
 
     Args:
         team_features: output of features.team.load_team_features().
@@ -86,9 +89,16 @@ def compute_opponent_quality_features(
         how="left",
     )
 
-    # 3. Classify opponent as strong/weak (above/below season median)
-    season_median_elo = df.groupby("season")["opp_elo"].transform("median")
-    df["opp_is_strong"] = (df["opp_elo"] >= season_median_elo).astype(int)
+    # 3. Classify opponent as strong/weak: above or below the league mean.
+    #
+    # This used to split on the *season median* of opponent ELO, computed over
+    # the whole season -- so an October game was labelled using ratings from
+    # April.  The live pipeline cannot do that; it only has the season to
+    # date, whose median wanders early on (1494 after the first seven games
+    # of 2026-27).  ELO is zero-sum and regresses toward INITIAL_ELO, so the
+    # league mean is that constant in every season, known in advance, and the
+    # same number in training and serving.
+    df["opp_is_strong"] = (df["opp_elo"] >= STRONG_OPPONENT_ELO).astype(int)
 
     # Persist the classified games so the live snapshot rolls the very same
     # rows, rather than re-deriving opponent strength from a second ELO pass.

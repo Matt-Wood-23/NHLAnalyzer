@@ -330,6 +330,62 @@ def build_goalie_starts(game_ids: Optional[Iterable[str]] = None) -> pd.DataFram
     return df
 
 
+def parse_game_result(box: dict) -> list[dict]:
+    """The official result of one finished game, as a one-row list.
+
+    The score here includes the goal awarded for a shootout, which no shot
+    file does.  Returns nothing for a game that is not final or has no winner
+    yet, so an in-progress boxscore can never be read as a result.
+    """
+    home, away = box.get("homeTeam") or {}, box.get("awayTeam") or {}
+    home_score, away_score = home.get("score"), away.get("score")
+    if box.get("gameState") not in FINAL_STATES:
+        return []
+    if home_score is None or away_score is None or home_score == away_score:
+        return []
+    last_period = (
+        (box.get("gameOutcome") or {}).get("lastPeriodType")
+        or (box.get("periodDescriptor") or {}).get("periodType")
+    )
+    return [{
+        "game_id":     str(box.get("id", "")),
+        "season_api":  box.get("season"),
+        "game_date":   box.get("gameDate"),
+        "game_type":   str(box.get("gameType", "")),
+        "home_team":   home.get("abbrev", ""),
+        "away_team":   away.get("abbrev", ""),
+        "home_score":  int(home_score),
+        "away_score":  int(away_score),
+        "home_win":    bool(home_score > away_score),
+        "last_period_type": last_period,
+        "went_to_ot":  last_period in ("OT", "SO"),
+        "went_to_so":  last_period == "SO",
+    }]
+
+
+def build_game_results(game_ids: Optional[Iterable[str]] = None) -> pd.DataFrame:
+    """Parse cached boxscores into one row per finished game: who won, and how.
+
+    This is the project's source of truth for results.  Wins used to be
+    derived from MoneyPuck shot totals, which contain no shootout: a shootout
+    game is tied there, so both teams were recorded as losing it and every
+    home shootout win became a home loss in the training target.
+    """
+    df = _from_cache(game_ids, parse_game_result)
+    if df.empty:
+        return df
+    logger.info(
+        "Game results: %d games, %.1f%% home wins, %d to overtime, %d to a shootout",
+        len(df), 100 * df["home_win"].mean(),
+        int(df["went_to_ot"].sum()), int(df["went_to_so"].sum()),
+    )
+    return df
+
+
+def load_game_results(path: Optional[Path] = None) -> pd.DataFrame:
+    return pd.read_parquet(path or PARQUET_DIR / "game_results.parquet")
+
+
 # ---------------------------------------------------------------------------
 # Merge: boxscore spine + MoneyPuck shot quality
 # ---------------------------------------------------------------------------

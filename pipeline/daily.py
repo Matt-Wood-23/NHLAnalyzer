@@ -5,6 +5,7 @@ Steps:
   1. Refresh MoneyPuck data (delete stale cache, re-download current season)
   2. Re-aggregate all seasons into team game stats parquet
   2b. Sync finished games into Postgres, so rest days have real dates
+  2c. Refresh official results from the boxscores (the win label)
   3. Rebuild the feature matrix (rolling stats, ELO, goalie, ST, etc.)
   4. Backfill outcomes for any previous predictions
   5. Print accuracy report
@@ -96,9 +97,14 @@ def refresh_data(conn=None):
     # Step 3: Rebuild the full feature matrix
     logger.info("Rebuilding feature matrix...")
     from pipeline.backfill import (
-        build_boxscore_spine, build_feature_matrix, build_player_game_stats,
-        save_feature_matrix,
+        build_boxscore_spine, build_feature_matrix, build_game_results,
+        build_player_game_stats, save_feature_matrix,
     )
+
+    # Official results first: the matrix takes its win label from them, and
+    # last night's games are not in the file until this runs.
+    logger.info("Refreshing official game results...")
+    build_game_results()
     matrix = build_feature_matrix(conn=conn)
     save_feature_matrix(matrix)
     logger.info("Feature matrix rebuilt: %d games x %d cols", *matrix.shape)

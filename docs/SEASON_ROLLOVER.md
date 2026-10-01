@@ -109,7 +109,8 @@ seen the most recent season.
 | `home_elo` / `away_elo` | Near 1500 and clustered — ratings regressed at the season boundary |
 | Rolling features | Mostly NaN on day one, and that is correct |
 | `python -m pipeline.saves_live` | `in_season_factor` is 1.0 for ~3 weeks, then drifts below it |
-| `python -m pipeline.props_live --dry-run` | Silent until skaters reach 5 games |
+| `python -m pipeline.props_live --dry-run` | Projections from night one — player form carries across seasons by design. Only players with fewer than 5 career games in the data are skipped |
+| Target mean in the rebuilt matrix | About 0.54. Near 0.50 means the official results are not being applied |
 | Scratch log line in `props_live` | "No scratches published yet" until roughly an hour before puck drop, then "dropped N of M skaters" |
 | `starter_basis` in `saves_live` | Reads "N of last 10 starts"; N will be small in the opening week because the window is still filling |
 

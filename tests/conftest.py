@@ -29,9 +29,13 @@ def isolate_from_real_data(tmp_path, monkeypatch):
     that actually has the data.  Point the module at an empty directory so the
     fallback can never reach it.
     """
+    from features import team
     from pipeline import evaluate_history
 
     sandbox = tmp_path / "sandbox"
+    # Same hazard for the win label: features.team overrides `won` from the
+    # official results file, and synthetic fixtures reuse real game IDs.
+    monkeypatch.setattr(team, "GAME_RESULTS_PATH", sandbox / "parquet" / "game_results.parquet")
     monkeypatch.setattr(evaluate_history, "PARQUET_DIR", sandbox / "parquet")
     monkeypatch.setattr(evaluate_history, "HISTORY_DIR", sandbox / "predictions")
     monkeypatch.setattr(

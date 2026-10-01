@@ -295,6 +295,38 @@ def build_player_game_stats() -> Path | None:
     return path
 
 
+def build_game_results() -> Path | None:
+    """Refresh the official results the win label and the scoring both read.
+
+    Must run *before* :func:`build_feature_matrix`: the matrix takes its
+    target from here, and a game missing from the file falls back to shot
+    totals, which cannot tell who won a shootout.
+
+    Cheap in season -- final games cache permanently, so a daily run fetches
+    only last night's slate.
+    """
+    from ingestion.boxscore import (
+        backfill_boxscores, build_game_results as parse_results,
+        game_universe, save_parquet,
+    )
+
+    try:
+        games = game_universe()
+    except FileNotFoundError as e:
+        logger.warning("Skipping game results: %s", e)
+        return None
+
+    tally = backfill_boxscores(games)
+    if tally["failed"]:
+        logger.warning("%d boxscore(s) failed to fetch", tally["failed"])
+
+    results = parse_results(games)
+    if results.empty:
+        logger.warning("No game results parsed -- leaving the file as it was")
+        return None
+    return save_parquet(results, "game_results")
+
+
 def build_boxscore_spine() -> Path | None:
     """Refresh the dressed-lineup spine the SOG model trains and serves from.
 
@@ -369,6 +401,7 @@ if __name__ == "__main__":
         except Exception as e:
             logger.warning("DB connect failed: %s — running Parquet-only", e)
 
+    build_game_results()
     matrix = build_feature_matrix(conn=conn)
     path = save_feature_matrix(matrix)
 

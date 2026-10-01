@@ -398,7 +398,10 @@ def build_team_recap(team: str, n_games: int = 10) -> dict:
 
     eps = 1e-9
     recent = recent.copy()
-    recent["won"] = (recent["goals_for"] > recent["goals_against"]).astype(int)
+    recent["won"] = (recent["goals_for"] > recent["goals_against"]).astype(float)
+    # Shot totals cannot show a shootout winner; the official result can.
+    from features.team import apply_official_results
+    recent = apply_official_results(recent)
     recent["xgf_pct"] = recent["xg_for"] / (recent["xg_for"] + recent["xg_against"] + eps)
 
     games = []

@@ -66,8 +66,11 @@ def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     df["cf_pct"]      = df["corsi_for"]   / (df["corsi_for"]  + df["corsi_against"]  + eps)
     df["sf_pct"]      = df["shots_for"]   / (df["shots_for"]  + df["shots_against"]  + eps)
     df["goal_diff"]   = df["goals_for"]   - df["goals_against"]
-    # won: 1.0 if this team won, 0.0 otherwise
+    # won: 1.0 if this team won, 0.0 otherwise.  Goals here come from shot
+    # data, which has no shootout, so this is only a first guess; the official
+    # result replaces it wherever one is known.
     df["won"]         = (df["goals_for"] > df["goals_against"]).astype(float)
+    df = apply_official_results(df)
 
     # regulation_win: 1.0 if won in regulation (no OT/SO).
     # Populated later by _add_regulation_wins() from shot-level period data.
@@ -75,6 +78,59 @@ def _add_derived_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "regulation_win" not in df.columns:
         df["regulation_win"] = np.nan
 
+    return df
+
+
+GAME_RESULTS_PATH = PARQUET_DIR / "game_results.parquet"
+
+
+def official_home_wins(path: Path | None = None) -> dict[str, bool]:
+    """``{game_id: home team won}`` from the boxscore-derived results file."""
+    path = path or GAME_RESULTS_PATH
+    if not path.exists():
+        return {}
+    results = pd.read_parquet(path, columns=["game_id", "home_win"])
+    return dict(zip(results["game_id"].astype(str), results["home_win"].astype(bool)))
+
+
+def apply_official_results(
+    df: pd.DataFrame,
+    home_wins: dict[str, bool] | None = None,
+) -> pd.DataFrame:
+    """Overwrite ``won`` with the official result wherever one is known.
+
+    MoneyPuck's shot files contain no shootout, so a game decided by one has
+    equal goals for both teams and ``goals_for > goals_against`` is false for
+    both: each was recorded as having lost.  That put a home *loss* in the
+    training target for every home shootout win -- 243 games, 3.5% of the
+    matrix, all in one direction.  The matrix said home teams win 50.2% of the
+    time; the league says 53.7%.
+
+    ``goal_diff`` is deliberately left as the on-ice margin.
+
+    A tied game with no official result cannot be decided here and stays a
+    loss for both sides; the count is logged because that is the exact case
+    this function exists to remove.
+    """
+    if home_wins is None:
+        home_wins = official_home_wins()
+
+    official = df["game_id"].astype(str).map(home_wins)
+    known = official.notna()
+    df = df.copy()
+    if known.any():
+        home_won = official[known].astype(bool)
+        is_home = df.loc[known, "is_home"].astype(bool)
+        df.loc[known, "won"] = (home_won == is_home).astype(float)
+
+    undecided = ~known & (df["goals_for"] == df["goals_against"])
+    if undecided.any():
+        logger.warning(
+            "%d tied game(s) have no official result and count as a loss for "
+            "both teams -- rebuild game_results.parquet "
+            "(python -m ingestion.boxscore --backfill --build)",
+            df.loc[undecided, "game_id"].nunique(),
+        )
     return df
 
 

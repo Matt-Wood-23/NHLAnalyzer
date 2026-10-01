@@ -76,6 +76,30 @@ def add_season(hist: pd.DataFrame) -> pd.DataFrame:
     return hist
 
 
+def load_outcomes() -> pd.DataFrame | None:
+    """``game_id -> target`` from the best source available.
+
+    Official results (parsed from the boxscores) come first.  The feature
+    matrix is the fallback, and only for games the results file lacks: its
+    target was once derived from shot totals, which scored every home
+    shootout win as a home loss.
+    """
+    frames = []
+    results_path = PARQUET_DIR / "game_results.parquet"
+    if results_path.exists():
+        results = pd.read_parquet(results_path, columns=["game_id", "home_win"])
+        frames.append(pd.DataFrame({
+            "game_id": results["game_id"].astype(str),
+            "target": results["home_win"].astype(float),
+        }))
+    fm_path = PARQUET_DIR / "feature_matrix.parquet"
+    if fm_path.exists():
+        frames.append(pd.read_parquet(fm_path, columns=["game_id", "target"]))
+    if not frames:
+        return None
+    return pd.concat(frames, ignore_index=True).drop_duplicates("game_id", keep="first")
+
+
 def attach_outcomes(
     hist: pd.DataFrame,
     outcomes: pd.DataFrame | None = None,
@@ -84,8 +108,8 @@ def attach_outcomes(
 
     Args:
         hist: prediction history.
-        outcomes: game_id -> target frame.  Read from the feature matrix when
-            omitted.
+        outcomes: game_id -> target frame.  Read from the official results,
+            then the feature matrix, when omitted (see load_outcomes).
 
     Returns the history with actual_home_win, correct, brier and season.
 
@@ -116,13 +140,12 @@ def attach_outcomes(
     )
 
     if outcomes is None:
-        fm_path = PARQUET_DIR / "feature_matrix.parquet"
-        if fm_path.exists():
-            outcomes = pd.read_parquet(fm_path, columns=["game_id", "target"])
-        else:
+        outcomes = load_outcomes()
+        if outcomes is None:
             logger.warning(
-                "No feature matrix at %s — keeping %d previously scored outcome(s)",
-                fm_path, int(stored.notna().sum()),
+                "No game results or feature matrix under %s — keeping %d "
+                "previously scored outcome(s)",
+                PARQUET_DIR, int(stored.notna().sum()),
             )
 
     if outcomes is not None:
