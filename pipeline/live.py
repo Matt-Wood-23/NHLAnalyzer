@@ -32,12 +32,13 @@ from dotenv import load_dotenv
 from features.team import (
     _add_derived_columns, _add_regulation_wins, pregame_snapshot,
 )
-from features.goalie_mp import GOALIE_WINDOWS
-from features.special_teams import ST_WINDOWS
+from features.goalie_mp import pregame_snapshot as goalie_pregame_snapshot
 from features.context import _DIVISIONS, _CONFERENCES
-from ingestion.nhl_api import fetch_schedule
+from ingestion.nhl_api import PREGAME_STATES, fetch_schedule
 from features.goalie_props import likely_starters
-from config.season import approximate_game_date, current_season, season_start, game_number
+from config.season import (
+    approximate_game_date, current_season, game_number, label_to_api, season_start,
+)
 from pipeline.evaluate_history import HISTORY_PATH
 
 logger = logging.getLogger(__name__)
@@ -107,7 +108,7 @@ def _build_team_snapshot(
 
 def _build_goalie_snapshot() -> pd.DataFrame:
     """
-    Return one row per team with the most recent starter's rolling goalie stats.
+    Return one row per team with its likely starter's rolling goalie stats.
     Uses goalie_game_stats.parquet saved during backfill.
 
     Index: team abbreviation.
@@ -122,52 +123,32 @@ def _build_goalie_snapshot() -> pd.DataFrame:
     starters = df[df["is_starter"]].copy()
     if starters.empty:
         return pd.DataFrame()
+    if "game_num" not in starters.columns:
+        starters["game_num"] = game_number(starters["game_id"]).values
 
-    starters["game_num"] = game_number(starters["game_id"])
-    starters = starters.sort_values(["goalie_id", "season", "game_num"])
-
-    # Compute rolling per goalie
-    roll_cols = ["save_pct", "gsax"]
-    for col in roll_cols:
-        for w in GOALIE_WINDOWS:
-            starters[f"{col}_l{w}"] = (
-                starters.groupby("goalie_id")[col]
-                .transform(lambda s: s.shift(1).rolling(w, min_periods=1).mean())
-            )
-
-    # Pick tonight's likely starter per team, then read his rolling stats.
-    #
-    # This used to sort by ("goalie_id", "season", "game_num") and take the
-    # last row of each team group -- which is the highest goalie_id's final
-    # start, not the team's most recent one.  For BOS in 2025-26 that served
-    # Swayman's numbers on a night Korpisalo had started last.
-    #
-    # It also used "whoever started last", which scores 45.6% against the
-    # boxscore starter flag.  likely_starters is the same rule the saves prop
-    # uses (59.7%), shared so the two pipelines cannot disagree about who is
-    # in net for the same game.
-    #
-    # The rolling values deliberately span seasons: features.goalie_mp rolls
-    # per goalie with no season reset, so a snapshot that reset here would
-    # feed the model something it never trained on.
+    # Who starts: the same rule the saves prop uses (59.7% against the boxscore
+    # starter flag; "whoever started last" scores 45.6%), shared so the two
+    # pipelines cannot disagree about who is in net for the same game.
     likely = likely_starters(starters, teams=None)
 
-    latest = (
-        starters.sort_values(["season", "game_num"])
-        .drop_duplicates(subset=["goalie_id"], keep="last")
-        .set_index("goalie_id")
-    )
+    # What he brings into the game: computed by features.goalie_mp, the code
+    # that builds the training matrix.  The values deliberately span seasons,
+    # because training rolls per goalie with no season reset.
+    #
+    # This used to re-derive the shifted rolling mean here and read each
+    # goalie's last row, which is the pre-game value for the start he had
+    # already made -- his most recent game was missing from every window.
+    pregame = goalie_pregame_snapshot(starters)
 
     rows = []
     for team, pick in likely.items():
-        if pick["goalie_id"] not in latest.index:
+        if pick["goalie_id"] not in pregame.index:
             continue
-        last = latest.loc[pick["goalie_id"]]
-        row = {"team": team}
-        for col in roll_cols:
-            for w in GOALIE_WINDOWS:
-                row[f"g_{col}_l{w}"] = last.get(f"{col}_l{w}", np.nan)
-        rows.append(row)
+        stats = pregame.loc[pick["goalie_id"]]
+        rows.append({"team": team, **{f"g_{c}": stats[c] for c in pregame.columns}})
+
+    if not rows:
+        return pd.DataFrame()
 
     snapshot = pd.DataFrame(rows).set_index("team")
     logger.info("Goalie snapshot built: %d teams", len(snapshot))
@@ -178,9 +159,12 @@ def _build_goalie_snapshot() -> pd.DataFrame:
 # Special teams snapshot (rolling PP/PK per team)
 # ---------------------------------------------------------------------------
 
-def _build_special_teams_snapshot(season: Optional[str] = None) -> pd.DataFrame:
+def _build_special_teams_snapshot(
+    season: Optional[str] = None,
+    teams: Optional[list[str]] = None,
+) -> pd.DataFrame:
     """
-    Return one row per team with rolling PP/PK stats.
+    Return one row per team with rolling PP/PK stats for its next game.
     Recomputes from raw MoneyPuck data cached during backfill.
 
     Index: team abbreviation.
@@ -188,7 +172,9 @@ def _build_special_teams_snapshot(season: Optional[str] = None) -> pd.DataFrame:
              pk_goals_against_l10, pk_goals_against_l20, etc.
     """
     try:
-        from features.special_teams import aggregate_special_teams_stats
+        from features.special_teams import (
+            aggregate_special_teams_stats, pregame_snapshot as st_pregame_snapshot,
+        )
     except ImportError:
         logger.warning("special_teams module not available — ST features will be NaN")
         return pd.DataFrame()
@@ -210,30 +196,7 @@ def _build_special_teams_snapshot(season: Optional[str] = None) -> pd.DataFrame:
         )
         return pd.DataFrame()
 
-    st_games = st_games.sort_values(["team", "season", "game_num"])
-
-    roll_cols = ["pp_goals", "pp_xg", "pp_shots",
-                 "pk_goals_against", "pk_xg_against", "pk_shots_against"]
-
-    # Compute rolling within season
-    for col in roll_cols:
-        for w in ST_WINDOWS:
-            st_games[f"{col}_l{w}"] = (
-                st_games.groupby(["team", "season"])[col]
-                .transform(lambda s: s.shift(1).rolling(w, min_periods=1).mean())
-            )
-
-    # For each team, take last row
-    rows = []
-    for team, grp in st_games.groupby("team"):
-        last = grp.iloc[-1]
-        row = {"team": team}
-        for col in roll_cols:
-            for w in ST_WINDOWS:
-                row[f"{col}_l{w}"] = last.get(f"{col}_l{w}", np.nan)
-        rows.append(row)
-
-    snapshot = pd.DataFrame(rows).set_index("team")
+    snapshot = st_pregame_snapshot(st_games, teams=teams)
     logger.info("Special teams snapshot built: %d teams", len(snapshot))
     return snapshot
 
@@ -264,55 +227,40 @@ def _build_elo_snapshot() -> pd.DataFrame:
 # Opponent quality snapshot (rolling stats vs strong/weak opponents)
 # ---------------------------------------------------------------------------
 
-def _build_opponent_quality_snapshot(season: Optional[str] = None) -> pd.DataFrame:
+def _build_opponent_quality_snapshot(
+    season: Optional[str] = None,
+    teams: Optional[list[str]] = None,
+) -> pd.DataFrame:
     """
-    Return one row per team with opponent-quality-adjusted rolling stats.
-    Uses the feature matrix built during backfill — extracts the latest
-    per-team values for oq columns.
+    Return one row per team with opponent-quality-adjusted rolling stats for
+    its next game, from the classified games the backfill saves.
 
     Index: team abbreviation.
     """
-    fm_path = PARQUET_DIR / "feature_matrix.parquet"
-    if not fm_path.exists():
-        logger.warning("No feature_matrix.parquet — opponent quality features will be NaN")
-        return pd.DataFrame()
+    from features.opponent_quality import (
+        OQ_GAMES_PATH, pregame_snapshot as oq_pregame_snapshot,
+    )
 
-    fm = pd.read_parquet(fm_path)
-    oq_cols = [c for c in fm.columns if "_vs_strong_" in c or "_vs_weak_" in c]
-    if not oq_cols:
+    if not OQ_GAMES_PATH.exists():
+        logger.warning(
+            "No %s — opponent quality features will be NaN "
+            "(rebuild the feature matrix: python -m pipeline.daily --refresh-only)",
+            OQ_GAMES_PATH.name,
+        )
         return pd.DataFrame()
 
     # features.opponent_quality rolls within (team, season); same reasoning as
     # the special-teams snapshot above.
     season = season or CURRENT_SEASON
-    if "season" in fm.columns:
-        fm = fm[fm["season"] == season]
-        if fm.empty:
-            logger.warning(
-                "No games for %s yet -- opponent-quality features will be NaN",
-                season,
-            )
-            return pd.DataFrame()
-
-    # Get home/away oq columns from the latest game per team
-    home_oq = [c for c in oq_cols if c.startswith("home_")]
-
-    rows = []
-    # Extract from home-team perspective
-    for team in fm["home_team"].unique():
-        team_games = fm[fm["home_team"] == team].iloc[-1:]
-        if team_games.empty:
-            continue
-        row = {"team": team}
-        for col in home_oq:
-            base = col.replace("home_", "", 1)
-            row[base] = team_games.iloc[0].get(col, np.nan)
-        rows.append(row)
-
-    if not rows:
+    oq_games = pd.read_parquet(OQ_GAMES_PATH)
+    oq_games = oq_games[oq_games["season"] == season]
+    if oq_games.empty:
+        logger.warning(
+            "No games for %s yet -- opponent-quality features will be NaN", season,
+        )
         return pd.DataFrame()
 
-    snapshot = pd.DataFrame(rows).set_index("team")
+    snapshot = oq_pregame_snapshot(oq_games, teams=teams)
     logger.info("Opponent quality snapshot built: %d teams", len(snapshot))
     return snapshot
 
@@ -324,26 +272,37 @@ def _build_opponent_quality_snapshot(season: Optional[str] = None) -> pd.DataFra
 def _team_last_game_date(
     parquet_path: Optional[Path] = None,
     conn=None,
+    before: Optional[date] = None,
 ) -> dict[str, date]:
-    """Return {team: last_completed_game_date}.
+    """Return {team: date of its last game before ``before``}.
 
     Deliberately *not* scoped to the current season.  features.context computes
     rest with ``groupby("team")["date"].shift(1)`` -- team only, no season
     reset -- so on opening night training saw roughly 180 days of rest, and the
     live path has to say the same thing.  Scoping this would be the bug.
+
+    ``before`` is the date being predicted.  Without it a game played earlier
+    the same day counts as the "last" one and rest comes out as zero, which is
+    what a late-evening run saw for every team that had already finished.
     """
+    if before is None:
+        before = date.today()
+
     if conn is not None:
         try:
             sql = """
                 SELECT team, MAX(date)::date AS last_date FROM (
-                    SELECT home_team AS team, date FROM games WHERE date IS NOT NULL
+                    SELECT home_team AS team, date FROM games
+                     WHERE date IS NOT NULL AND date < %(before)s
                     UNION ALL
-                    SELECT away_team AS team, date FROM games WHERE date IS NOT NULL
+                    SELECT away_team AS team, date FROM games
+                     WHERE date IS NOT NULL AND date < %(before)s
                 ) sub
                 GROUP BY team
             """
-            df = pd.read_sql(sql, conn)
+            df = pd.read_sql(sql, conn, params={"before": before})
             df["last_date"] = pd.to_datetime(df["last_date"]).dt.date
+            _warn_if_dates_are_stale(conn, parquet_path)
             return dict(zip(df["team"], df["last_date"]))
         except Exception as e:
             logger.warning("DB last-game query failed: %s — falling back to parquet approximation", e)
@@ -364,6 +323,37 @@ def _team_last_game_date(
         except (ValueError, TypeError):
             logger.warning("Cannot estimate last game date for %s", team)
     return result
+
+
+def _warn_if_dates_are_stale(conn, parquet_path: Optional[Path] = None) -> None:
+    """Say so when the database knows of fewer games than the stats do.
+
+    Nothing fails when the ``games`` table falls behind: rest days simply stop
+    updating, so every team looks rested and no back-to-back ever fires.  The
+    2026-27 season opened with the table a whole season behind and nothing
+    reported it.
+    """
+    if parquet_path is None:
+        parquet_path = PARQUET_DIR / "moneypuck_team_game_stats.parquet"
+    try:
+        stats = pd.read_parquet(parquet_path, columns=["game_id", "season"])
+        played = stats.loc[stats["season"] == CURRENT_SEASON, "game_id"].nunique()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM games WHERE season = %s AND date IS NOT NULL",
+                (label_to_api(CURRENT_SEASON),),
+            )
+            dated = cur.fetchone()[0]
+    except Exception as e:
+        logger.debug("Could not check game-date freshness: %s", e)
+        return
+    if dated < played:
+        logger.warning(
+            "Game dates are behind: %d %s game(s) dated in Postgres, %d in the "
+            "stats. Rest days and back-to-backs are stale — run "
+            "python -m pipeline.daily (or --refresh-only) to sync them.",
+            dated, CURRENT_SEASON, played,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -406,29 +396,39 @@ def _build_context_row(
     }
 
 
-def _load_h2h(conn, home_team: str, away_team: str) -> float:
-    """Return average home win rate in the last 3 meetings between these two teams."""
+def _load_h2h(
+    conn, home_team: str, away_team: str, before: Optional[date] = None,
+) -> float:
+    """Average home win rate in the last 3 meetings before ``before``.
+
+    The cutoff matters once the games table is kept current: a run made after
+    puck drop would otherwise count tonight's result as a previous meeting.
+    """
     if conn is None:
         return np.nan
+    if before is None:
+        before = date.today()
     try:
         sql = """
             SELECT home_team, home_win FROM games
-            WHERE (home_team = %(h)s AND away_team = %(a)s)
-               OR (home_team = %(a)s AND away_team = %(h)s)
-            ORDER BY date DESC NULLS LAST
+            WHERE ((home_team = %(h)s AND away_team = %(a)s)
+                OR (home_team = %(a)s AND away_team = %(h)s))
+              AND date < %(before)s
+            ORDER BY date DESC
             LIMIT 3
         """
-        df = pd.read_sql(sql, conn, params={"h": home_team, "a": away_team})
-        if df.empty:
+        df = pd.read_sql(
+            sql, conn, params={"h": home_team, "a": away_team, "before": before},
+        )
+        # The home side's win rate in those meetings, whoever was home -- not
+        # reoriented to tonight's home team.  That is what features.context
+        # computes, so it is what the model learned.  This used to flip each
+        # result to tonight's perspective, a more natural quantity that
+        # matched training on a third of games.
+        wins = df["home_win"].dropna().astype(float)
+        if wins.empty:
             return np.nan
-        # Flip home_win for rows where today's home team was actually the away team
-        wins = []
-        for _, row in df.iterrows():
-            if row["home_team"] == home_team:
-                wins.append(float(row["home_win"]) if pd.notna(row["home_win"]) else 0.5)
-            else:
-                wins.append(1.0 - float(row["home_win"]) if pd.notna(row["home_win"]) else 0.5)
-        return float(np.mean(wins))
+        return float(wins.mean())
     except Exception as e:
         logger.warning("H2H query failed: %s", e)
         return np.nan
@@ -497,7 +497,7 @@ def build_live_features(
 
         # Context
         ctx = _build_context_row(home, away, game_date, last_game, opener)
-        ctx["h2h_home_win_rate_l3"] = _load_h2h(conn, home, away)
+        ctx["h2h_home_win_rate_l3"] = _load_h2h(conn, home, away, before=game_date)
         row.update(ctx)
 
         # Goalie features
@@ -575,6 +575,20 @@ def load_model(model_name: str = DEFAULT_MODEL):
 # features we refuse to publish rather than emit a confident-looking number.
 MIN_FEATURE_COVERAGE = 0.70
 
+# What a team's first game of the season must still have.  Everything rolling
+# resets at the boundary, so coverage there is ~7% by construction; these carry
+# across it, and without them an opener has nothing to stand on at all.
+OPENER_REQUIRED = ["home_elo", "away_elo"]
+
+
+def first_game_of_season(live_df: pd.DataFrame) -> pd.Series:
+    """True where either team has yet to play this season."""
+    cols = ["home_games_played", "away_games_played"]
+    if not all(c in live_df.columns for c in cols):
+        return pd.Series(False, index=live_df.index)
+    played = live_df[cols].apply(pd.to_numeric, errors="coerce")
+    return played.min(axis=1).eq(0)
+
 
 def predict(
     live_df: pd.DataFrame,
@@ -584,11 +598,23 @@ def predict(
 ) -> pd.DataFrame:
     """Apply the saved model.
 
-    Adds ``prob_home_win`` and ``feature_coverage`` (the fraction of the
-    model's features that were actually populated for that game).  Rows below
-    ``min_coverage`` are dropped: the imputer silently replaces every missing
-    value with a column mean, so a pipeline break upstream used to surface as
-    a plausible-looking 50-something percent rather than as an error.
+    Adds ``prob_home_win``, ``feature_coverage`` (the fraction of the model's
+    features that were actually populated for that game) and
+    ``season_opener``.  Rows below ``min_coverage`` are dropped: the imputer
+    silently replaces every missing value with a column mean, so a pipeline
+    break upstream used to surface as a plausible-looking 50-something percent
+    rather than as an error.
+
+    The exception is a team's first game of the season.  Low coverage there is
+    not a fault: training rows for those games have a median of 7% too, in
+    every one of five seasons, and from a team's second game coverage is never
+    below 77%.  A flat threshold cannot tell the two apart, so it refused the
+    whole slate for the opening week and blamed a rebuild that had run fine.
+    Openers are held to :data:`OPENER_REQUIRED` instead, and marked.
+
+    They are published, not endorsed: walk-forward Brier on first games is
+    0.2456 against 0.2496 for the base rate (n=78, difference -0.004 +/- 0.010)
+    — no measurable skill, and the predictions barely leave 50%.
     """
     live_df = live_df.copy()
 
@@ -604,29 +630,52 @@ def predict(
     X = live_df[feature_cols].apply(pd.to_numeric, errors="coerce")
     live_df["feature_coverage"] = X.notna().mean(axis=1)
 
-    usable = live_df["feature_coverage"] >= min_coverage
-    if not usable.all():
-        for _, row in live_df[~usable].iterrows():
+    live_df["season_opener"] = first_game_of_season(live_df)
+    required = [c for c in OPENER_REQUIRED if c in X.columns]
+    opener_ok = X[required].notna().all(axis=1) if required else True
+
+    usable = np.where(
+        live_df["season_opener"], opener_ok,
+        live_df["feature_coverage"] >= min_coverage,
+    )
+    usable = pd.Series(usable, index=live_df.index).astype(bool)
+
+    for _, row in live_df[~usable].iterrows():
+        if row["season_opener"]:
             logger.error(
-                "Dropping %s @ %s — only %.0f%% of features available (need %.0f%%)",
+                "Dropping %s @ %s — a season opener with no ELO rating for one "
+                "side; check that elo_ratings.parquet was rebuilt",
+                row.get("away_team"), row.get("home_team"),
+            )
+        else:
+            logger.error(
+                "Dropping %s @ %s — only %.0f%% of features available (need "
+                "%.0f%%) though both teams have played this season, so a "
+                "snapshot failed to build; look for a warning above",
                 row.get("away_team"), row.get("home_team"),
                 row["feature_coverage"] * 100, min_coverage * 100,
             )
-        live_df = live_df[usable].copy()
-        X = X[usable]
+    for _, row in live_df[usable & live_df["season_opener"]].iterrows():
+        logger.warning(
+            "%s @ %s is a season opener — %.0f%% of features exist yet, the "
+            "same as in training. Published on ELO, goalie and rest alone; "
+            "there is no measured skill on these games.",
+            row.get("away_team"), row.get("home_team"),
+            row["feature_coverage"] * 100,
+        )
+
+    live_df = live_df[usable].copy()
+    X = X[usable]
 
     if live_df.empty:
-        logger.error(
-            "No game had enough usable features — check that the feature "
-            "matrix and snapshots were rebuilt (python -m pipeline.daily)",
-        )
+        logger.error("Every game on the slate was dropped — no predictions")
         return live_df
 
-    worst = live_df["feature_coverage"].min()
-    if worst < 1.0:
+    settled = live_df.loc[~live_df["season_opener"], "feature_coverage"]
+    if len(settled) and settled.min() < 1.0:
         logger.info(
             "Feature coverage: min %.1f%%, mean %.1f%%",
-            worst * 100, live_df["feature_coverage"].mean() * 100,
+            settled.min() * 100, settled.mean() * 100,
         )
 
     live_df["prob_home_win"] = pipeline.predict_proba(X.values)[:, 1]
@@ -758,6 +807,21 @@ def save_predictions_to_db(predictions: pd.DataFrame, conn, model_name: str) -> 
         return 0
 
 
+def mark_started(predictions: pd.DataFrame, games: list[dict]) -> pd.DataFrame:
+    """Add ``already_started``: True once a game is past its pre-game states.
+
+    A schedule entry with no state at all is treated as not started, so an
+    older cached payload cannot stop the log being written.
+    """
+    started = {
+        str(g["game_id"]) for g in games
+        if g.get("game_state") is not None and g["game_state"] not in PREGAME_STATES
+    }
+    predictions = predictions.copy()
+    predictions["already_started"] = predictions["game_id"].astype(str).isin(started)
+    return predictions
+
+
 # ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
@@ -776,10 +840,13 @@ def run(
     Args:
         target_date:  date to predict for (default: today)
         model_name:   which saved model to use
-        dry_run:      skip DB save if True
+        dry_run:      write nothing — neither Postgres nor the history log
         conn:         optional psycopg2 connection
         min_coverage: drop games with fewer than this fraction of the model's
-                      features populated
+                      features populated (season openers excepted; see predict)
+        save_history: write the Parquet prediction log; defaults to
+                      ``not dry_run``.  Games already under way are never
+                      written, whatever this says.
 
     Returns:
         DataFrame with game_id, home_team, away_team, prob_home_win, and context cols.
@@ -808,14 +875,15 @@ def run(
 
     # 2b. Goalie, special teams, ELO, and opponent quality snapshots
     goalie_snapshot = _build_goalie_snapshot()
-    st_snapshot = _build_special_teams_snapshot()
+    st_snapshot = _build_special_teams_snapshot(teams=slate_teams)
     elo_snapshot = _build_elo_snapshot()
-    oq_snapshot = _build_opponent_quality_snapshot()
+    oq_snapshot = _build_opponent_quality_snapshot(teams=slate_teams)
 
     # 3. Last game date per team (for rest / B2B)
     last_game = _team_last_game_date(
         parquet_path=PARQUET_DIR / "moneypuck_team_game_stats.parquet",
         conn=conn,
+        before=target_date,
     )
 
     # 4. Build live feature matrix
@@ -853,25 +921,43 @@ def run(
     # pipeline.daily was relying on that: it passed dry_run=True meaning "skip
     # Postgres" while still wanting the history logged, which is why the two
     # are now separate flags rather than one doing double duty.
+    #
+    # A game that has already started is shown but never recorded.  Whatever
+    # is written for it after puck drop is not a prediction: the price
+    # attached is a live or closed line, and once the night's results are
+    # ingested the features include the game itself.  Because the log keeps
+    # the latest row per game, a late re-run used to overwrite the genuine
+    # pre-game record with exactly that.
+    predictions = mark_started(predictions, reg_games)
+    recordable = predictions[~predictions["already_started"]]
+    if len(recordable) < len(predictions):
+        logger.warning(
+            "%d of %d game(s) on %s have already started — shown below but not "
+            "written to the prediction log",
+            len(predictions) - len(recordable), len(predictions), date_str,
+        )
+
     if save_history is None:
         save_history = not dry_run
     if save_history:
-        save_prediction_history(predictions, model_name, target_date)
+        if len(recordable):
+            save_prediction_history(recordable, model_name, target_date)
     else:
         logger.info(
             "Dry run -- not writing %d prediction(s) to the history log",
-            len(predictions),
+            len(recordable),
         )
 
     # 6b. Optionally save to DB
-    if not dry_run and conn is not None:
-        save_predictions_to_db(predictions, conn, model_name)
+    if not dry_run and conn is not None and len(recordable):
+        save_predictions_to_db(recordable, conn, model_name)
 
     # 7. Return display columns
     display_cols = [
         "game_id", "home_team", "away_team", "prob_home_win",
         "home_back_to_back", "away_back_to_back", "rest_advantage",
         "home_elo", "away_elo", "feature_coverage", "market_prob_home",
+        "season_opener", "already_started",
     ]
     keep = [c for c in display_cols if c in predictions.columns]
     return predictions[keep]

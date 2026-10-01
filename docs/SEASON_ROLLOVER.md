@@ -11,8 +11,16 @@ Add the new season's opening date to `config/season.py`:
 SEASON_STARTS: dict[int, str] = {
     ...
     2025: "2025-10-08",
-    2026: "2026-10-06",   # <- add the real opener
+    2026: "2026-09-29",   # <- add the real opener
 }
+```
+
+Read the date from the API rather than from a slate you happen to be looking
+at — the 2026 entry was first written as October 5th, labelled "confirmed",
+and was six days late:
+
+```bash
+curl -s https://api-web.nhle.com/v1/schedule/2026-10-01 | python -c "import sys, json; print(json.load(sys.stdin)['regularSeasonStartDate'])"
 ```
 
 That is it. The season list, the MoneyPuck download map, the NHL API season
@@ -95,6 +103,9 @@ seen the most recent season.
 | Check | Expected |
 |---|---|
 | `python -m pipeline.live --dry-run` | Games appear, no "Missing snapshot" warnings |
+| `season_opener` column | True for every game on night one, then only for teams yet to play |
+| Second night, a team that played the first | `home_back_to_back` / `away_back_to_back` is 1 — if not, game dates are not syncing |
+| "Game dates are behind" warning | Absent. If present, run `python -m pipeline.daily --refresh-only` |
 | `home_elo` / `away_elo` | Near 1500 and clustered — ratings regressed at the season boundary |
 | Rolling features | Mostly NaN on day one, and that is correct |
 | `python -m pipeline.saves_live` | `in_season_factor` is 1.0 for ~3 weeks, then drifts below it |
@@ -102,31 +113,31 @@ seen the most recent season.
 | Scratch log line in `props_live` | "No scratches published yet" until roughly an hour before puck drop, then "dropped N of M skaters" |
 | `starter_basis` in `saves_live` | Reads "N of last 10 starts"; N will be small in the opening week because the window is still filling |
 
-### Expect no predictions for the first few days
-
-This is the one behaviour change worth deciding on before opening night.
+### Opening week: predictions are published, and they are thin
 
 Rolling features make up the overwhelming majority of the model's inputs, and
-on day one none of them exist — every team has zero games in the new season.
-Feature coverage is therefore very low, and the guard drops those games
-rather than publishing a number that is almost entirely column means wearing
-a probability's clothes.
+for a team's first game none of them exist. Coverage is about 7% — in the
+training matrix as well, every season.
 
-Coverage climbs as games accumulate and predictions resume on their own,
-typically within the first week. If you would rather publish ELO-and-context
-predictions from night one, lower the threshold:
+Those games are published anyway, on ELO, goalie form and rest, and flagged
+`season_opener`. They used to be dropped: the coverage guard could not tell
+"nothing has been played" from "a snapshot failed", so in 2026 it refused the
+whole opening week and suggested re-running the command that had just run.
 
-```bash
-python -m pipeline.live --dry-run --min-coverage 0.05
-```
+Do not read much into them. Walk-forward Brier on first games is 0.2456
+against 0.2496 for the base rate (n = 78, −0.004 ± 0.010) — no measurable
+skill. Exclude them from evaluation by `feature_coverage`.
 
-Those picks are real — ELO, rest, back-to-back and division flags are all
-populated on day one — but they are much weaker than mid-season ones, so
-treat the early-season Brier score accordingly.
+From a team's second game coverage is 77% or better and the ordinary 70%
+guard applies. Below that with both teams having played means a snapshot
+failed to build; the log says which.
 
-Later in the season the opposite reading applies: low coverage means a
-snapshot failed to rebuild, not that it is early. Check the `feature_coverage`
-column in the prediction history to tell the two apart.
+### Run it before puck drop
+
+A game already under way is predicted and displayed but never written to the
+prediction log. So a run made in the evening records nothing for that night,
+by design: the price it would attach is a live line, and once results are
+ingested the features contain the game being "predicted".
 
 That last row is intentional. Training rolls stats strictly within a season,
 so on opening night the model has no rolling history and leans on ELO and
@@ -161,8 +172,9 @@ These are rare, but they are the things a new season can actually break.
   `tests/test_context.py::TestLeagueStructure` fails if the two disagree or
   if a division no longer has eight teams. Add the emoji in
   `bot/discord_bot.py` too.
-- **Schedule length change.** `TOTAL_GAMES` and `SEASON_DAYS` in
-  `config/season.py` drive the game-id-to-date estimate used when Postgres
-  is unavailable.
+- **Schedule length change.** Add an entry to `SCHEDULE_SHAPES` in
+  `config/season.py` — `(total games, days)`, keyed by the first season it
+  applies to. It drives the game-id-to-date estimate used when Postgres is
+  unavailable. 2026-27 went from 82 games to 84 and nothing flagged it.
 - **MoneyPuck column changes.** `ingestion/moneypuck.py` names its columns
   explicitly; a rename surfaces as a `KeyError` during aggregation.

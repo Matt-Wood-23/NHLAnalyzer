@@ -28,8 +28,11 @@ from features.goalie import load_goalie_features
 from features.goalie_mp import load_goalie_features_from_mp
 from features.context import load_context_features
 from features.special_teams import load_special_teams_features
-from features.elo import compute_elo_ratings, load_elo_params, save_elo_snapshot
+from features.elo import (
+    compute_elo_ratings, load_elo_params, ratings_entering, save_elo_snapshot,
+)
 from features.opponent_quality import compute_opponent_quality_features
+from config.season import current_season
 
 logger = logging.getLogger(__name__)
 
@@ -199,14 +202,22 @@ def build_feature_matrix(conn=None) -> pd.DataFrame:
     )
     logger.info("ELO features merged")
 
-    # Save current ELO state for live pipeline
-    save_elo_snapshot(final_elos)
+    # Save current ELO state for live pipeline -- as it will stand entering the
+    # next game, which before a season's first game means already regressed.
+    save_elo_snapshot(ratings_entering(
+        final_elos,
+        last_season_played=home_results["season"].max(),
+        season=current_season(),
+        season_regress=elo_params["season_regress"],
+    ))
 
     # ------------------------------------------------------------------ #
     # 7. Opponent quality-adjusted features                                #
     # ------------------------------------------------------------------ #
     # Reuse the ELO pass above rather than replaying the whole schedule.
-    oq_feats = compute_opponent_quality_features(team_feats, elo_df=elo_df)
+    oq_feats = compute_opponent_quality_features(
+        team_feats, elo_df=elo_df, save_intermediate=True,
+    )
     if not oq_feats.empty:
         oq_roll = [c for c in oq_feats.columns if c not in ("game_id", "team")]
         home_oq = (

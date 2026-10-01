@@ -153,6 +153,37 @@ def compute_goalie_rolling_features(
     if windows is None:
         windows = GOALIE_WINDOWS
 
+    result = _roll_starters(goalie_games, windows)
+    if result.empty:
+        return result
+
+    # Keep only the columns needed for merging into the feature matrix
+    keep_cols = ["game_id", "team"] + _rolling_columns(windows)
+    result = result[keep_cols]
+
+    logger.info(
+        "Goalie rolling features: %d starter-game rows, %d feature columns",
+        len(result), len(keep_cols) - 2,
+    )
+    return result
+
+
+GOALIE_ROLL_COLS = ["save_pct", "gsax"]
+
+# game_id of the placeholder row pregame_snapshot appends per goalie.
+_NEXT_GAME = "__next__"
+
+
+def _rolling_columns(windows: list[int]) -> list[str]:
+    return [f"{col}_l{w}" for col in GOALIE_ROLL_COLS for w in windows]
+
+
+def _roll_starters(goalie_games: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+    """Shifted rolling means per goalie over his starts, across seasons.
+
+    The one implementation behind both the training features and the live
+    snapshot.
+    """
     # Only compute rolling for starters
     starters = goalie_games[goalie_games["is_starter"]].copy()
     if starters.empty:
@@ -161,32 +192,60 @@ def compute_goalie_rolling_features(
     # Sort chronologically per goalie (across seasons)
     starters = starters.sort_values(["goalie_id", "season", "game_num"])
 
-    roll_cols = ["save_pct", "gsax"]
     parts = []
-
     for goalie_id, grp in starters.groupby("goalie_id", sort=False):
         grp = grp.copy()
-        for col in roll_cols:
+        for col in GOALIE_ROLL_COLS:
             shifted = grp[col].shift(1)
             for w in windows:
                 grp[f"{col}_l{w}"] = shifted.rolling(w, min_periods=1).mean()
         parts.append(grp)
 
-    result = pd.concat(parts, ignore_index=True)
+    return pd.concat(parts, ignore_index=True)
 
-    # Keep only the columns needed for merging into the feature matrix
-    keep_cols = ["game_id", "team"]
-    for col in roll_cols:
-        for w in windows:
-            keep_cols.append(f"{col}_l{w}")
 
-    result = result[keep_cols]
+def pregame_snapshot(
+    goalie_games: pd.DataFrame,
+    windows: list[int] | None = None,
+) -> pd.DataFrame:
+    """Rolling stats each goalie would carry into his *next* start.
 
-    logger.info(
-        "Goalie rolling features: %d starter-game rows, %d feature columns",
-        len(result), len(keep_cols) - 2,
+    Appends a placeholder start per goalie and runs the same
+    :func:`_roll_starters` as training, then returns the placeholder's values.
+
+    The live pipeline used to compute the shifted mean itself and read each
+    goalie's last row — the pre-game value for the start he had already made,
+    so his most recent game was missing and the window reached one start too
+    far back.
+
+    Returns:
+        DataFrame indexed by ``goalie_id``, one column per rolling feature.
+    """
+    if windows is None:
+        windows = GOALIE_WINDOWS
+
+    starters = goalie_games[goalie_games["is_starter"]]
+    if starters.empty:
+        return pd.DataFrame()
+
+    last = (
+        starters.sort_values(["season", "game_num"])
+        .drop_duplicates(subset=["goalie_id"], keep="last")
     )
-    return result
+    placeholders = pd.DataFrame({
+        "game_id": _NEXT_GAME,
+        "goalie_id": last["goalie_id"].values,
+        "team": last["team"].values,
+        "season": last["season"].values,
+        "game_num": last["game_num"].values + 1,
+        "is_starter": True,
+    })
+
+    rolled = _roll_starters(
+        pd.concat([starters, placeholders], ignore_index=True), windows,
+    )
+    out = rolled[rolled["game_id"] == _NEXT_GAME]
+    return out.set_index("goalie_id")[_rolling_columns(windows)]
 
 
 def load_goalie_features_from_mp(

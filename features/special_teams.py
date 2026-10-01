@@ -202,6 +202,55 @@ def compute_special_teams_rolling(
     return result
 
 
+# game_id of the placeholder row pregame_snapshot appends per team.
+_NEXT_GAME = "__next__"
+
+
+def pregame_snapshot(
+    st_games: pd.DataFrame,
+    teams: list[str] | None = None,
+) -> pd.DataFrame:
+    """Rolling PP/PK features for each team's *next* game.
+
+    Appends a placeholder game per team and runs the identical
+    :func:`compute_special_teams_rolling` that builds the training matrix,
+    then returns the placeholder's values — the same construction as
+    :func:`features.team.pregame_snapshot`.
+
+    The live pipeline used to re-derive the shifted rolling mean and take each
+    team's last row.  That row is the pre-game value for the game *already
+    played*: it excludes the most recent game and reaches one game further
+    back than training does.  Every PP/PK feature was served one game stale,
+    and a team's second game of the season got NaN where training had its
+    first game's numbers.
+
+    Args:
+        st_games: output of :func:`aggregate_special_teams_stats`, scoped to a
+                  *single season* (training rolls within team and season).
+        teams:    teams that must appear.  A team with no games yet gets an
+                  all-NaN row, which is what training saw on opening night.
+
+    Returns:
+        DataFrame indexed by team, one column per rolling feature.
+    """
+    wanted = sorted(set(teams or []) | set(st_games["team"].unique()))
+    if not wanted:
+        return pd.DataFrame()
+
+    season = st_games["season"].iloc[0] if len(st_games) else "next"
+    next_num = int(st_games["game_num"].max()) + 1 if len(st_games) else 1
+    placeholders = pd.DataFrame({
+        "game_id": _NEXT_GAME, "team": wanted,
+        "season": season, "game_num": next_num,
+    })
+
+    rolled = compute_special_teams_rolling(
+        pd.concat([st_games, placeholders], ignore_index=True)
+    )
+    out = rolled[rolled["game_id"] == _NEXT_GAME]
+    return out.drop(columns=["game_id"]).set_index("team")
+
+
 def load_special_teams_features(raw_dir: Path | None = None) -> pd.DataFrame:
     """
     Top-level: aggregate + rolling.

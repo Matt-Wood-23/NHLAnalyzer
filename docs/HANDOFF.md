@@ -6,8 +6,12 @@ Written for whoever picks this up next, human or agent.
 was written before any of it had touched real data — see
 [Verified vs. not](#verified-vs-not).
 
-**Sessions 2, 3 and 4** (below) were all run against real data. Twelve
-commits on `main`, unpushed, 302 tests passing.
+**Sessions 2, 3 and 4** (below) were all run against real data.
+
+**Session 5** ([below](#session-5--opening-week-30-september-2026)) is the
+first with the season under way, and it found that three of the five live
+snapshots had been serving stale features all along. Read it before trusting
+anything Sessions 1-4 say about train/serve parity. 393 tests passing.
 
 ---
 
@@ -805,6 +809,9 @@ CLV check: no evidence of edge yet.
 
 ## 20. The season opener
 
+> **Wrong — corrected in Session 5.** The season opened 2026-09-29. The date
+> below was never confirmed against anything.
+
 `SEASON_STARTS` stopped at 2025. The 2026-27 season opens **2026-10-05**,
 confirmed against the schedule API. Without it `season_start` fell back to
 Oct 8 with a warning — a three-day error feeding `approximate_game_date` and
@@ -851,3 +858,195 @@ the first real one:
   one command; what is missing is a lockfile, failure notification through the
   existing webhook, and retry on the MoneyPuck download. **This is now the
   largest single gap** — everything it would run is built and tested.
+
+---
+
+# Session 5 — opening week, 30 September 2026
+
+The season opened on 29 September. `python -m pipeline.daily` produced nothing
+on either of the first two nights, ending in "No games scheduled" directly
+under three lines naming the games it had dropped. 393 tests passing (was
+305). Everything below was measured on the live season.
+
+## 21. The coverage guard refused the whole opening week
+
+`predict` drops any game with under 70% of the model's features populated.
+For a team's first game of a season that is every game: rolling features reset
+at the boundary, so coverage is ~7%.
+
+That is not a serving fault. In the training matrix:
+
+    min(games played)   n     coverage min / median / max
+    0                 106     0.024 / 0.070 / 0.352
+    1                  82     0.774 / 0.819 / 0.875
+    5                  79     0.857 / 0.944 / 0.972
+    25+             4,823     0.774 / 1.000 / 1.000
+
+The split is clean — nothing between 0.35 and 0.77 — so the guard now asks
+which side a game is on. A game where either team has yet to play is an
+*opener*: it must have an ELO rating for both sides, and is published and
+flagged `season_opener`. Everything else keeps the 70% rule, which still
+means what it was written to mean.
+
+`docs/SEASON_ROLLOVER.md` documented the old behaviour as a choice ("expect no
+predictions for the first few days") with `--min-coverage 0.05` as the way
+out. `pipeline.daily` never exposed that flag, and lowering it would have
+switched the guard off for the rest of the season.
+
+**Openers are published, not endorsed.** Walk-forward, production model:
+
+| Games | n | model | base rate | difference |
+|:--|--:|--:|--:|--:|
+| first game of season | 78 | 0.2456 | 0.2496 | −0.004 ± 0.010 |
+| games 2–5 | 267 | 0.2453 | 0.2500 | −0.005 ± 0.006 |
+| games 6–10 | 325 | 0.2457 | 0.2499 | −0.004 ± 0.006 |
+| game 11 onward | 4,807 | 0.2418 | 0.2502 | −0.008 ± 0.002 |
+
+Nothing before game 11 is distinguishable from the base rate. Predictions on
+openers have a standard deviation of 0.045 — they barely leave 50%.
+
+The same run has an ELO-only logistic at 0.2413 against the 287-feature
+forest's 0.2423 over all 5,477 games. ELO parameters are tuned on the full
+history, so that comparison flatters ELO and is not clean — but it is
+consistent with the note under "Still open" that feature selection has
+previously helped, and it wants a proper look.
+
+## 22. Three live snapshots were one game stale
+
+Found while reading the guard, and the larger problem.
+
+Training computes `shift(1).rolling(w)`, so the row for game *N* holds the
+mean of games before *N*. The live builders for special teams, goalie form and
+opponent quality computed that same shifted series and took the **last row** —
+the pre-game value for the game already played. For the next game that is one
+game stale at both ends: the most recent game missing, one too-old game still
+in the window.
+
+Replayed against the training matrix mid-way through 2025-26 (every team's
+next game after game 767), before the fix:
+
+| Family | cells matching training | median error |
+|:--|--:|--:|
+| team rolling | 100% | — |
+| special teams | 21.6% | 0.20 sd |
+| opponent quality | 16.0% | 0.24 sd |
+| goalie form | 0% | 0.51 sd |
+
+After: 100% in every family, at that cut and at two in the opening week
+(games 20 and 40). Goalie form is compared for the goalie who actually
+started; with the *guessed* starter it matches only where the guess is right,
+which is the separate, known limit from section 14.
+
+Opponent quality was worse than stale. It read each team's last **home** row
+off the feature matrix, so it lagged by however many road games followed, and
+a team that had only played away had no row at all.
+
+It mattered most this week: a team's second game got NaN for every PP/PK
+feature where training had its first game's numbers, which pushed coverage
+under 70% and would have kept dropping games even with section 21 fixed.
+
+Each module now has a `pregame_snapshot` built like
+`features.team.pregame_snapshot` — append a placeholder game, run the training
+function, read the placeholder. `opponent_quality` also saves the classified
+games it rolls (`opponent_quality_games.parquet`) so live uses the same
+strong/weak split as training instead of replaying ELO.
+
+The refactor leaves the training matrix byte-identical.
+
+**Why four sessions of tests missed it:** `TestSnapshotSeasonScoping` asserts
+on the *source text* of these functions — that a string like
+`st_games["season"] == season` appears. Those tests passed throughout.
+`tests/test_pregame_snapshots.py` states the property instead: the snapshot
+after *k* games equals the training row for game *k + 1*.
+
+**Residual, not fixed:** opponent strength is classified against the *season
+median* opponent ELO, which in training is computed over the whole season —
+so October rows are classified using information from April. The median sits
+near 1500 all year, so the effect is small, but it is look-ahead in a training
+feature. Fixing it changes the matrix and needs a retrain.
+
+## 23. Head-to-head meant two different things
+
+`features.context` averages raw `home_win` over the last three meetings — the
+home side's win rate in those games, whoever was home. `_load_h2h` flipped
+each result to tonight's home team. The live definition is the more natural
+quantity; it is not what the model learned. On 300 real games the flipped
+version matched training on 33%, the un-flipped on 100%. Live now matches.
+
+Whether the training definition is the *right* feature is a separate question
+and probably deserves a no. Changing it means a retrain.
+
+## 24. Nothing kept game dates current
+
+Rest days, back-to-backs, season-day and head-to-head all read dates from the
+Postgres `games` table. The only thing that ever wrote dates to it was
+`python -m ingestion.nhl_api`, run by hand. `pipeline.daily` passes
+`conn=None` to the MoneyPuck ingest on purpose and has no other write.
+
+So 2026-27 opened with zero games in the table. Live, Toronto on the second
+night of a back-to-back read as 168 days rested. In the matrix, the new
+season's rows had no context features at all.
+
+`sync_completed_games` upserts finished regular-season and playoff games from
+the schedule endpoint — one request per week, so one request on a normal day —
+and `refresh_data` calls it before the matrix rebuild. `pipeline.live` warns
+when Postgres holds fewer current-season games than the stats do, which is the
+state that used to pass silently.
+
+Both date queries now take `before=target_date`. Without it, a game finished
+earlier the same evening was the "last" one and rest came out as zero.
+
+**The no-database fallback was also broken, by Session 3.** `game_number`
+changed from `NNNN` to `TTNNNN` and `approximate_game_date` was still dividing
+by 1,312, so game 311 landed in 2033. Only reachable without Postgres — which
+is every option in `docs/deployment-options.html` except running it on the PC.
+It now takes the sort key, and playoff keys sort after the regular season.
+
+## 25. The opener, the schedule, and ELO on night one
+
+- `SEASON_STARTS[2026]` said `2026-10-05`, with a comment claiming it was
+  confirmed against the API. It was not. The season opened **2026-09-29**
+  (`regularSeasonStartDate` on `/v1/schedule/{date}`), which made `season_day`
+  negative for the first week.
+- 2026-27 is an **84-game** season. `TOTAL_GAMES = 1312` was hard-coded;
+  `schedule_shape(season)` now reads `SCHEDULE_SHAPES`.
+- The ELO replay regresses ratings when it reaches a new season's first game,
+  so until one exists the saved snapshot is last April's. Opening night would
+  have been served un-regressed ratings on the one slate that rests on ELO
+  alone. `ratings_entering` applies the regression when the last game played
+  belongs to an earlier season. Too late to matter this year; a test pins it
+  against the replay for next.
+
+## 26. A started game is shown, never logged
+
+`pipeline.live` now writes a game to the prediction log only while it is `FUT`
+or `PRE`.
+
+This was demonstrated rather than argued. During this session MoneyPuck
+published the night's finished games; re-running moved Philadelphia's
+"prediction" against Pittsburgh from 51% to 33%, because the features now
+included the 7–0 loss in that same game. With `keep="last"` on the log, any
+evening re-run of `pipeline.daily` had been free to replace a real pre-game
+record with that, plus a live line as its `market_prob_home`.
+
+**Consequence: 29 and 30 September are not in the log and should not be
+added.** Nothing run now can reconstruct what the model would have said.
+
+## Open items after Session 5
+
+- **Automation is now the gap that costs something.** The log only records
+  games predicted before puck drop, so a missed morning is a missed night.
+  See `docs/deployment-options.html`. Whichever host is chosen needs Postgres
+  or the date estimate, and the estimate is not good enough for back-to-backs.
+- **Game dates should not need a database.** Every boxscore in
+  `data/cache/boxscores/` carries `gameDate`. A `game_dates.parquet` built
+  alongside the spine would make the pipeline self-contained and fill the ~350
+  playoff games from 2021-24 that have no date in Postgres.
+- **Retrain is due.** The matrix has grown by a season since the saved model
+  was fitted, and the two training-side issues above (opponent-strength
+  look-ahead, the head-to-head definition) can only be fixed with one.
+- **Feature selection.** See the ELO-only comparison in section 21.
+- **Source-text tests.** `tests/test_live_predict.py` still has several that
+  assert a string appears in a function. Each is a candidate for the kind of
+  miss in section 22.
+- Everything under "Open items after Session 4" still stands.

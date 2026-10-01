@@ -43,7 +43,10 @@ SEASON_STARTS: dict[int, str] = {
     2023: "2023-10-10",
     2024: "2024-10-08",
     2025: "2025-10-08",
-    2026: "2026-10-05",   # confirmed against the NHL schedule API, not estimated
+    # From `regularSeasonStartDate` on /v1/schedule/{date}.  An earlier entry
+    # here said 2026-10-05 and claimed to be confirmed; it was not, and the
+    # season opened six days before it.  Read the field, do not eyeball a slate.
+    2026: "2026-09-29",
 }
 
 # A new season is considered "current" from this month onward, so pre-season
@@ -51,8 +54,16 @@ SEASON_STARTS: dict[int, str] = {
 SEASON_ROLLOVER_MONTH = 9
 
 # Structural constants for the game_id -> approximate-date fallback.
+# These are the 82-game values; use schedule_shape() for a given season.
 SEASON_DAYS = 185      # regular season spans roughly 185 days
 TOTAL_GAMES = 1312     # 32 teams x 82 games / 2
+
+# (total games, days) by the first season each shape applies to.  2026-27
+# moved to 84 games per team and opens in late September.
+SCHEDULE_SHAPES: dict[int, tuple[int, int]] = {
+    FIRST_SEASON_YEAR: (TOTAL_GAMES, SEASON_DAYS),
+    2026: (32 * 84 // 2, 193),
+}
 
 # Fallback opener when a season's real date has not been added yet:
 # the NHL almost always opens in the first full week of October.
@@ -182,13 +193,36 @@ def season_starts_by_label(today: date | None = None) -> dict[str, str]:
     return {season_label(y): season_start(y).isoformat() for y in season_years(today)}
 
 
+def schedule_shape(season: str | int) -> tuple[int, int]:
+    """``(total regular-season games, days)`` for a season.
+
+    A season inherits the most recent shape at or before it, so a schedule
+    change is one new entry in :data:`SCHEDULE_SHAPES`.
+    """
+    year = season_year(season)
+    applicable = [y for y in SCHEDULE_SHAPES if y <= year]
+    return SCHEDULE_SHAPES[max(applicable) if applicable else min(SCHEDULE_SHAPES)]
+
+
 def approximate_game_date(season: str | int, game_num: int) -> date:
     """Estimate a game's date from its sequence number within the season.
 
     Used when Postgres game dates are unavailable.  Accurate to a few days —
     good enough for back-to-back detection in most cases.
+
+    ``game_num`` may be a bare sequence number (311) or the ``TTNNNN`` key
+    from :func:`game_number` (20311).  Both callers pass the latter, and when
+    this only understood the former it read game 311 as game 20,311 and put it
+    eight years after the opener.  Playoff keys (3RRSG: round, series, game)
+    are placed after the regular season, in round order.
     """
-    offset = int(game_num / TOTAL_GAMES * SEASON_DAYS)
+    total_games, season_days = schedule_shape(season)
+    game_type, seq = divmod(int(game_num), 10000)
+    if game_type == 3:
+        rnd, game = seq // 100, seq % 10
+        offset = season_days + 3 + (max(rnd, 1) - 1) * 14 + (max(game, 1) - 1) * 2
+    else:
+        offset = int(seq / total_games * season_days)
     return season_start(season) + timedelta(days=offset)
 
 

@@ -128,6 +128,18 @@ def format_game_embed(row: dict, odds: Optional[dict] = None) -> dict:
     pick  = home if p_home >= p_away else away
     conf  = _confidence_label(p_fav)
     pick_line = f"**Pick: {_team_str(pick)}** — {conf} ({p_fav:.1%})\n\n"
+    if row.get("season_opener"):
+        # Nothing rolling exists for a team's first game, so this is ELO,
+        # goalie and rest only.  Say so next to the number rather than let it
+        # read like a mid-season pick.
+        pick_line += (
+            "*Season opener — no form to go on yet. ELO and rest only; "
+            "historically no better than a coin flip.*\n\n"
+        )
+    if row.get("already_started"):
+        # Once the night's results are ingested the features include this
+        # very game, so the number is no longer a forecast of it.
+        pick_line += "*Already under way — not a pre-game prediction, and not logged.*\n\n"
 
     # ELO ratings
     home_elo = row.get("home_elo")

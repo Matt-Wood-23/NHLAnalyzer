@@ -172,6 +172,16 @@ the season boundary would feed the model inputs it had never been trained
 on. `tests/test_team_features.py::TestTrainServeParity` asserts the two
 agree on every rolling column.
 
+The same holds for special teams, goalie form and opponent quality: each
+feature module exposes a `pregame_snapshot` that appends a placeholder game
+and runs the training function over it. Until the 2026-27 opener those three
+were re-derived in the live pipeline, which read each team's *last row* — the
+pre-game value for the game already played. Every one of those features was
+served one game stale, and a team's second game of the season got NaN where
+training had real numbers. `tests/test_pregame_snapshots.py` now pins the
+property directly: the snapshot after *k* games equals the training row for
+game *k + 1*.
+
 A team with no games yet gets an all-NaN row instead of being dropped, which
 is exactly what the model saw for opening night during training — and means
 no game silently disappears from the first few days of the schedule.
@@ -195,9 +205,9 @@ per goalie with no season reset, and `features.context` computes rest with
 rest, and a live path that reset would be answering a different question from
 the one the model was fitted on.
 
-The three that *are* scoped serve NaN in October, which is exactly what the
-model saw in training on an opening night, and what the coverage guard below
-is there to catch.
+The three that *are* scoped serve NaN for a team's first game, which is
+exactly what the model saw in training on an opening night — and why the
+coverage guard below treats that game separately.
 
 ### Feature coverage guard
 
@@ -215,11 +225,26 @@ python -m pipeline.live --dry-run --min-coverage 0.9
 Coverage is written to the prediction history alongside each pick, so
 degradation is visible after the fact rather than only in the logs.
 
-One consequence worth knowing: on the opening night of a season no team has
-any rolling history, so coverage is very low and the guard withholds those
-games. Predictions resume on their own as games accumulate. To publish
-ELO-and-context-only picks from night one instead, pass a lower threshold —
-see [docs/SEASON_ROLLOVER.md](docs/SEASON_ROLLOVER.md).
+**A team's first game of the season is the exception.** Coverage there is
+about 7% by construction — in the training matrix too, in every season — and
+from a team's second game it is never below 77%. A flat threshold cannot tell
+"nothing has been played yet" from "a snapshot failed to build", so it dropped
+the whole slate for the 2026-27 opening week. Openers are instead required to
+have an ELO rating for both sides, published, and flagged `season_opener` in
+the log and in Discord.
+
+Published is not endorsed: walk-forward Brier on first games is 0.2456
+against 0.2496 for the base rate (n = 78, difference −0.004 ± 0.010). That is
+no measurable skill, and those predictions barely leave 50%. Filter them out
+of any evaluation by `feature_coverage`.
+
+### Games that have started are shown, never logged
+
+`pipeline.live` predicts whatever is on the slate, but only writes a game to
+the prediction log while it is still `FUT` or `PRE`. After puck drop the
+attached price is a live line, and once the night's results are ingested the
+features include the game itself. The log keeps the latest row per game, so
+a late re-run used to overwrite the genuine pre-game record with that.
 
 ## Discord Bot
 
@@ -535,6 +560,12 @@ python -m features.elo
 
 Postgres is optional throughout — every path falls back to Parquet, and the
 `psycopg2` driver is only imported when a `DATABASE_URL` is actually set.
+
+The one thing it buys is real game dates. `pipeline.daily` syncs finished
+games into the `games` table before rebuilding the matrix, and rest days,
+back-to-backs and head-to-head are read from there. Without a database those
+dates are estimated from game numbers — good to a few days, which is not
+enough to trust a back-to-back flag.
 
 ### Starting a new season
 

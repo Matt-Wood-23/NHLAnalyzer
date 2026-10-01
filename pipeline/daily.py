@@ -4,10 +4,15 @@ Daily NHL prediction pipeline — single command for the full workflow.
 Steps:
   1. Refresh MoneyPuck data (delete stale cache, re-download current season)
   2. Re-aggregate all seasons into team game stats parquet
+  2b. Sync finished games into Postgres, so rest days have real dates
   3. Rebuild the feature matrix (rolling stats, ELO, goalie, ST, etc.)
   4. Backfill outcomes for any previous predictions
   5. Print accuracy report
   6. Run today's live predictions and save to history
+
+Run it before the first puck drop.  Games already under way are predicted and
+shown but not written to the history: by then the price is a live line and the
+refreshed features may contain the game itself.
 
 Usage:
     python -m pipeline.daily                  # full pipeline
@@ -25,7 +30,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from config.season import current_season, current_season_year
+from config.season import current_season, current_season_year, season_start
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +40,35 @@ RAW_DIR = Path(__file__).parent.parent / "data" / "raw"
 def current_season_cache_file() -> Path:
     """MoneyPuck shot cache for the season in progress (resolved at call time)."""
     return RAW_DIR / f"moneypuck_shots_{current_season_year()}.csv"
+
+
+def sync_game_dates(conn=None) -> int:
+    """Bring the Postgres ``games`` table up to last night.
+
+    A failure here must not stop the run, but it must not pass quietly either:
+    stale dates do not break anything visibly, they just make every team look
+    rested.  Without a database the pipeline falls back to estimating dates
+    from game numbers, which is good to a few days — not enough to trust a
+    back-to-back flag.
+    """
+    if conn is None:
+        logger.warning(
+            "No database — game dates will be estimated from game numbers; "
+            "rest days and back-to-backs are approximate",
+        )
+        return 0
+
+    from ingestion.nhl_api import sync_recent_games
+
+    try:
+        return sync_recent_games(conn, season_start(current_season()))
+    except Exception as e:
+        conn.rollback()
+        logger.error(
+            "Could not sync game dates (%s) — rest days and back-to-backs "
+            "will be stale for this run", e,
+        )
+        return 0
 
 
 def refresh_data(conn=None):
@@ -54,6 +88,10 @@ def refresh_data(conn=None):
     # Step 2: Re-aggregate all seasons (only current season re-downloads; others are cached)
     logger.info("Re-aggregating MoneyPuck data for all seasons...")
     ingest_all_seasons(conn=None)
+
+    # Step 2b: Game dates.  Must precede the matrix rebuild, which reads them
+    # for rest / back-to-back / season-day, and the live run reads them again.
+    sync_game_dates(conn)
 
     # Step 3: Rebuild the full feature matrix
     logger.info("Rebuilding feature matrix...")
@@ -113,7 +151,10 @@ def run_predictions(target_date, model_name="random_forest", conn=None):
     )
 
     if preds.empty:
-        print(f"\nNo games scheduled for {target_date}.")
+        # Empty means either an empty slate or every game refused; the log
+        # above says which.  This used to print "No games scheduled" for both,
+        # directly beneath three lines naming the games it had just dropped.
+        print(f"\nNo predictions for {target_date} — see the log above for why.")
     else:
         print(f"\nPredictions for {target_date}:")
         print(preds.to_string(index=False))

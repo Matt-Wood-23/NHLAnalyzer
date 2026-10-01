@@ -77,6 +77,73 @@ class TestSeasonStarts:
     def test_total_games_matches_a_32_team_league(self):
         assert cfg.TOTAL_GAMES == 32 * 82 // 2
 
+    def test_2026_27_opens_in_september(self):
+        """The table said 2026-10-05, annotated "confirmed".  It was not: the
+        season opened on 2026-09-29, which put season_day at -6 on night one.
+        The value comes from regularSeasonStartDate on /v1/schedule/{date}."""
+        assert cfg.season_start("2026-2027") == date(2026, 9, 29)
+
+    def test_no_game_is_scheduled_before_its_season_opens(self):
+        """Cheap sanity net for the next wrong entry: an opener in the table
+        must not fall after the rollover-to-rollover window it belongs to."""
+        for year, opener in cfg.SEASON_STARTS.items():
+            d = date.fromisoformat(opener)
+            assert d.year == year and d.month in (9, 10), (year, opener)
+
+
+class TestScheduleShape:
+    """2026-27 went to 84 games per team; the date estimate assumed 82."""
+
+    def test_the_82_game_seasons_are_unchanged(self):
+        assert cfg.schedule_shape("2025-2026") == (1312, 185)
+        assert cfg.schedule_shape("2021-2022") == (1312, 185)
+
+    def test_2026_27_is_84_games(self):
+        games, days = cfg.schedule_shape("2026-2027")
+        assert games == 32 * 84 // 2
+        assert cfg.season_start("2026-2027") + cfg.timedelta(days=days) == date(2027, 4, 10)
+
+    def test_later_seasons_inherit_the_latest_shape(self):
+        assert cfg.schedule_shape(2031) == cfg.schedule_shape(2026)
+
+    def test_a_season_before_the_table_starts_does_not_crash(self):
+        assert cfg.schedule_shape(2015) == (1312, 185)
+
+    def test_the_last_game_lands_at_the_end_of_the_season(self):
+        last = cfg.approximate_game_date("2026-2027", 1344)
+        assert last == date(2027, 4, 10)
+
+
+class TestApproximateDateTakesTheSortKey:
+    """game_number() returns TTNNNN.  Both no-database fallbacks pass that
+    straight in, and when this function only understood NNNN it read game 311
+    as game 20,311 and dated it eight years after the opener."""
+
+    def test_the_sort_key_and_the_bare_number_agree(self):
+        assert cfg.approximate_game_date("2025-2026", 20311) == \
+            cfg.approximate_game_date("2025-2026", 311)
+
+    def test_a_regular_season_key_stays_inside_the_season(self):
+        opener = cfg.season_start("2025-2026")
+        for key in (20001, 20656, 21312):
+            d = cfg.approximate_game_date("2025-2026", key)
+            assert opener <= d <= opener + cfg.timedelta(days=cfg.SEASON_DAYS), key
+
+    def test_playoffs_come_after_the_regular_season(self):
+        last_regular = cfg.approximate_game_date("2025-2026", 21312)
+        first_playoff = cfg.approximate_game_date("2025-2026", 30111)
+        assert first_playoff > last_regular
+
+    def test_playoff_rounds_are_in_order(self):
+        keys = [30111, 30117, 30211, 30311, 30411, 30417]
+        dates = [cfg.approximate_game_date("2025-2026", k) for k in keys]
+        assert dates == sorted(dates)
+
+    def test_it_composes_with_game_number(self):
+        key = int(cfg.game_number(["2025020311"]).iloc[0])
+        d = cfg.approximate_game_date("2025-2026", key)
+        assert d.year in (2025, 2026)
+
 
 class TestGameNumber:
     """The sort key every rolling feature depends on.

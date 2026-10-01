@@ -248,6 +248,30 @@ def save_current_elos(
     return save_elo_snapshot(final)
 
 
+def ratings_entering(
+    final_ratings: dict[str, float],
+    last_season_played: str,
+    season: str,
+    season_regress: float = SEASON_REGRESS,
+    initial_elo: float = INITIAL_ELO,
+) -> dict[str, float]:
+    """The ratings teams carry into ``season``'s next game.
+
+    :func:`_run_elo` regresses every rating toward the mean when it reaches
+    the first game of a new season, so the pre-game ratings in the training
+    matrix for opening night are regressed ones.  Its *final* ratings are not,
+    until that first game exists.  Saved as they stood, the snapshot for
+    opening night held last April's ratings, on the one slate that rests on
+    ELO alone.
+    """
+    if last_season_played == season:
+        return dict(final_ratings)
+    return {
+        team: elo * (1 - season_regress) + initial_elo * season_regress
+        for team, elo in final_ratings.items()
+    }
+
+
 def save_elo_snapshot(final_ratings: dict[str, float]) -> Path:
     """Write the latest per-team ratings for the live pipeline to read."""
     elo_df = pd.DataFrame(

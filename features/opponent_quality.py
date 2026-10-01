@@ -29,6 +29,7 @@ OQ_STATS = ["xgf_pct", "cf_pct", "won", "goal_diff"]
 def compute_opponent_quality_features(
     team_features: pd.DataFrame,
     elo_df: pd.DataFrame | None = None,
+    save_intermediate: bool = False,
 ) -> pd.DataFrame:
     """
     Compute rolling stats split by opponent quality (above/below median ELO).
@@ -41,6 +42,9 @@ def compute_opponent_quality_features(
             :func:`features.elo.compute_elo_ratings`.  Pass the backfill's
             existing frame to avoid replaying the schedule a second time, and
             to make sure both use the same tuned parameters.
+        save_intermediate: write the classified per-game rows to
+            ``opponent_quality_games.parquet`` for the live pipeline.  Off by
+            default so tests and ad-hoc calls do not touch the data directory.
 
     Returns:
         DataFrame with (game_id, team) and rolling columns:
@@ -86,7 +90,44 @@ def compute_opponent_quality_features(
     season_median_elo = df.groupby("season")["opp_elo"].transform("median")
     df["opp_is_strong"] = (df["opp_elo"] >= season_median_elo).astype(int)
 
+    # Persist the classified games so the live snapshot rolls the very same
+    # rows, rather than re-deriving opponent strength from a second ELO pass.
+    if save_intermediate:
+        PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+        df[_GAME_COLS].to_parquet(OQ_GAMES_PATH, index=False)
+        logger.info("Saved opponent-quality games → %s (%d rows)", OQ_GAMES_PATH, len(df))
+
     # 4. Rolling by opponent quality within (team, season)
+    result = _roll_by_strength(df)[["game_id", "team"] + _rolling_columns()]
+
+    logger.info(
+        "Opponent quality features: %d rows, %d columns",
+        len(result), len(result.columns) - 2,
+    )
+    return result
+
+
+OQ_GAMES_PATH = PARQUET_DIR / "opponent_quality_games.parquet"
+
+_GAME_COLS = ["game_id", "season", "team", "game_num", "opp_is_strong"] + OQ_STATS
+
+# game_id of the placeholder row pregame_snapshot appends per team.
+_NEXT_GAME = "__next__"
+
+
+def _rolling_columns() -> list[str]:
+    return [
+        f"{col}_vs_{label}_l{w}"
+        for col in OQ_STATS for label in ("strong", "weak") for w in OQ_WINDOWS
+    ]
+
+
+def _roll_by_strength(df: pd.DataFrame) -> pd.DataFrame:
+    """Shifted rolling means split by opponent strength, within (team, season).
+
+    The one implementation behind both the training features and the live
+    snapshot.
+    """
     df = df.sort_values(["team", "season", "game_num"])
 
     parts = []
@@ -102,22 +143,50 @@ def compute_opponent_quality_features(
                     ).mean()
         parts.append(grp)
 
-    result = pd.concat(parts, ignore_index=True)
+    return pd.concat(parts, ignore_index=True)
 
-    # Keep only game_id, team, and the new rolling columns
-    keep = ["game_id", "team"]
-    for col in OQ_STATS:
-        for label in ["strong", "weak"]:
-            for w in OQ_WINDOWS:
-                keep.append(f"{col}_vs_{label}_l{w}")
 
-    result = result[keep]
+def pregame_snapshot(
+    oq_games: pd.DataFrame,
+    teams: list[str] | None = None,
+) -> pd.DataFrame:
+    """Opponent-quality features for each team's *next* game.
 
-    logger.info(
-        "Opponent quality features: %d rows, %d columns",
-        len(result), len(keep) - 2,
+    Appends a placeholder game per team and runs the same
+    :func:`_roll_by_strength` as training.  The placeholder's own opponent
+    does not matter: every value is shifted, so only games already played
+    reach it.
+
+    The live pipeline used to read these off the feature matrix, taking each
+    team's last *home* row.  That is the pre-game value for a game already
+    played — stale by however many road games followed it — and a team that
+    had only played away had no row at all.
+
+    Args:
+        oq_games: the classified per-game rows saved by
+                  :func:`compute_opponent_quality_features`, scoped to a
+                  *single season*.
+        teams:    teams that must appear; one with no games gets an all-NaN row.
+
+    Returns:
+        DataFrame indexed by team, one column per rolling feature.
+    """
+    wanted = sorted(set(teams or []) | set(oq_games["team"].unique()))
+    if not wanted:
+        return pd.DataFrame()
+
+    season = oq_games["season"].iloc[0] if len(oq_games) else "next"
+    next_num = int(oq_games["game_num"].max()) + 1 if len(oq_games) else 1
+    placeholders = pd.DataFrame({
+        "game_id": _NEXT_GAME, "team": wanted, "season": season,
+        "game_num": next_num, "opp_is_strong": 0,
+    })
+
+    rolled = _roll_by_strength(
+        pd.concat([oq_games, placeholders], ignore_index=True)
     )
-    return result
+    out = rolled[rolled["game_id"] == _NEXT_GAME]
+    return out.set_index("team")[_rolling_columns()]
 
 
 if __name__ == "__main__":

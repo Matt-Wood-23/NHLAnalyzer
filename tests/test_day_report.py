@@ -210,7 +210,7 @@ class TestPipelineWiring:
     def test_live_passes_the_target_date_through(self):
         import inspect
         from pipeline import live
-        assert "save_prediction_history(predictions, model_name, target_date)" \
+        assert "save_prediction_history(recordable, model_name, target_date)" \
             in inspect.getsource(live.run)
 
     def test_the_webhook_can_post_results(self):

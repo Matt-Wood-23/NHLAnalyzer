@@ -148,3 +148,57 @@ class TestTuning:
         assert best["k_factor"] in (10.0, 20.0)
         assert best["ot_win_value"] in (0.6, 1.0)
         assert 0.0 <= best["brier"] <= 1.0
+
+
+class TestRatingsEnteringASeason:
+    """The saved snapshot must be what teams carry into their *next* game.
+
+    The replay regresses ratings when it reaches a new season's first game, so
+    until that game exists the final ratings are last April's.  On opening
+    night the live pipeline served those un-regressed, on the one slate that
+    rests on ELO alone.
+    """
+
+    def _next_season_opener(self):
+        return pd.DataFrame([{
+            "game_id": "2026020001", "season": "2026-2027", "home_team": "BOS",
+            "away_team": "TOR", "home_win": float("nan"), "went_to_ot": 0.0,
+        }])
+
+    def test_it_matches_what_training_sees_on_opening_night(self, elo_games):
+        from features.elo import ratings_entering
+
+        params = default_elo_params()
+        _, final = compute_elo_ratings(elo_games, return_final=True, **params)
+        entering = ratings_entering(
+            final, "2025-2026", "2026-2027",
+            season_regress=params["season_regress"],
+        )
+
+        both = pd.concat([elo_games, self._next_season_opener()], ignore_index=True)
+        opener = compute_elo_ratings(both, **params).iloc[-1]
+        assert entering["BOS"] == pytest.approx(opener["home_elo"])
+        assert entering["TOR"] == pytest.approx(opener["away_elo"])
+
+    def test_it_pulls_every_rating_toward_the_mean(self, elo_games):
+        from features.elo import ratings_entering
+
+        _, final = compute_elo_ratings(elo_games, return_final=True)
+        entering = ratings_entering(final, "2025-2026", "2026-2027")
+        for team, rating in final.items():
+            assert abs(entering[team] - INITIAL_ELO) <= abs(rating - INITIAL_ELO)
+        assert entering != final
+
+    def test_mid_season_ratings_are_left_alone(self, elo_games):
+        """Once a game has been played this season the replay has already
+        regressed; doing it again would regress twice."""
+        from features.elo import ratings_entering
+
+        _, final = compute_elo_ratings(elo_games, return_final=True)
+        assert ratings_entering(final, "2025-2026", "2025-2026") == final
+
+    def test_the_backfill_saves_the_entering_ratings(self):
+        import inspect
+        from pipeline import backfill
+        src = inspect.getsource(backfill.build_feature_matrix)
+        assert "save_elo_snapshot(ratings_entering(" in src

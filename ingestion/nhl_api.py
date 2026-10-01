@@ -78,8 +78,84 @@ def fetch_schedule(date_str: str) -> list[dict]:
                 "away_team":  game["awayTeam"]["abbrev"],
                 "home_score": game.get("homeTeam", {}).get("score"),
                 "away_score": game.get("awayTeam", {}).get("score"),
+                # FUT / PRE before puck drop, LIVE / CRIT during, then
+                # OVER / FINAL / OFF.  Lets callers tell a game they can still
+                # predict from one that has already started.
+                "game_state": game.get("gameState"),
+                "start_time_utc": game.get("startTimeUTC"),
+                "last_period_type": (game.get("gameOutcome") or {}).get("lastPeriodType"),
             })
     return games
+
+
+# A game is settled in any of these states; OFF is the official final.
+FINAL_STATES = {"OFF", "FINAL", "OVER"}
+# ...and has not started in these.
+PREGAME_STATES = {"FUT", "PRE"}
+
+
+def sync_completed_games(conn, since: date, until: Optional[date] = None) -> int:
+    """Upsert every finished regular-season or playoff game in a date range.
+
+    The ``games`` table is where both the training context features and the
+    live rest-day calculation read dates from, and nothing in the daily run
+    was writing to it — it was only ever filled by running this module by
+    hand.  So a new season started with the table a season behind: every team
+    looked ~170 days rested however recently it had played, back-to-backs
+    never registered, and the new season's training rows had no context
+    features at all.
+
+    One schedule call covers a week, so a daily catch-up is a single request.
+    Only finished games are written, which keeps the table a record of what
+    has been played rather than of what is scheduled.
+
+    Returns the number of games written.
+    """
+    until = until or date.today()
+    seen: set[str] = set()
+    day = since
+    while day <= until:
+        for g in fetch_schedule(day.isoformat()):
+            if g["game_id"] in seen:
+                continue
+            if g["game_type"] not in (GAME_TYPE_REGULAR, GAME_TYPE_PLAYOFF):
+                continue
+            if g.get("game_state") not in FINAL_STATES:
+                continue
+            if g["home_score"] is None or g["away_score"] is None:
+                continue
+            seen.add(g["game_id"])
+            last_period = g.get("last_period_type")
+            upsert_game(conn, {
+                "game_id":    g["game_id"],
+                "date":       g["date"],
+                "season":     g["season"],
+                "game_type":  g["game_type"],
+                "home_team":  g["home_team"],
+                "away_team":  g["away_team"],
+                "home_score": g["home_score"],
+                "away_score": g["away_score"],
+                "home_win":   g["home_score"] > g["away_score"],
+                "went_to_ot": last_period in ("OT", "SO"),
+                "went_to_so": last_period == "SO",
+            })
+        day += timedelta(days=7)  # API returns a full week per call
+    conn.commit()
+    logger.info("Synced %d completed game(s) since %s", len(seen), since)
+    return len(seen)
+
+
+def sync_recent_games(conn, season_opener: date) -> int:
+    """Catch the ``games`` table up from wherever it left off this season."""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT MAX(date) FROM games WHERE date >= %s AND home_win IS NOT NULL",
+            (season_opener,),
+        )
+        latest = cur.fetchone()[0]
+    # Re-read the last week: a postponed game can finish after later ones.
+    since = max(season_opener, latest - timedelta(days=7)) if latest else season_opener
+    return sync_completed_games(conn, since)
 
 
 def fetch_season_schedule(season: str) -> list[dict]:
