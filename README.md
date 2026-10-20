@@ -583,6 +583,28 @@ back-to-backs and head-to-head are read from there. Without a database those
 dates are estimated from game numbers — good to a few days, which is not
 enough to trust a back-to-back flag.
 
+### Running it every day, unattended
+
+`python -m pipeline.scheduled_run` is the whole morning in one command:
+
+1. refresh the data and score last night's predictions (`pipeline.daily --refresh-only`)
+2. predict today's games, write the prediction log and post to Discord
+   (`bot.discord_bot --webhook --results`)
+3. commit the prediction log
+
+A failed step stops the run and posts a one-line notice to the same webhook.
+A failed refresh stops it before anything is predicted, so stale features
+never reach the log. Output goes to `logs/daily-YYYY-MM-DD.log`.
+
+`scripts/register_daily_task.ps1` registers it as a Windows scheduled task at
+10:00 Eastern, set to wake the PC from sleep. Run it once from an elevated
+PowerShell in the repo root. A PC that is shut down rather than asleep runs the
+task at its next startup instead, and games already under way by then are not
+logged.
+
+Only one machine should run this: the prediction log is the one file that
+cannot be rebuilt, and two copies of it will diverge.
+
 ### Starting a new season
 
 Adding the new season's opening date to `config/season.py` is the only edit
@@ -626,6 +648,7 @@ NHLAnalyzer/
     props_live.py           # Player prop predictions (drops scratches)
     saves_live.py           # Goalie saves predictions
     daily.py                # One-command daily pipeline (refresh + score + predict)
+    scheduled_run.py        # Unattended morning run: refresh, predict + post, commit the log
     evaluate_history.py     # Backfill prediction outcomes
   bot/
     discord_bot.py          # Discord webhook + slash commands
@@ -637,6 +660,8 @@ NHLAnalyzer/
     player_stats.py         # MoneyPuck shot aggregation + player game logs
     odds_api.py             # Odds API client
   tests/                    # Pytest suite (synthetic data, no network/DB)
+  scripts/
+    register_daily_task.ps1 # Windows scheduled task for pipeline.scheduled_run
   docs/
     SEASON_ROLLOVER.md      # Pre-season checklist
   results/                  # Model evaluation reports
