@@ -187,10 +187,16 @@ class TestGameNumber:
         """13 call sites had their own copy of the buggy expression."""
         import pathlib
         root = pathlib.Path(__file__).resolve().parent.parent
+        # Only this project's code: a virtualenv inside the repo holds
+        # third-party files, some not even UTF-8.
+        skip = {"tests", "__pycache__", "site-packages"}
         offenders = [
             p.relative_to(root).as_posix()
             for p in root.rglob("*.py")
-            if "tests" not in p.parts and "__pycache__" not in p.parts
+            if not any(
+                part in skip or part.startswith(".")
+                for part in p.relative_to(root).parts
+            )
             and 'str[-4:]' in p.read_text(encoding="utf-8")
         ]
         assert offenders == [], f"still deriving game_num by hand: {offenders}"

@@ -771,42 +771,6 @@ def save_prediction_history(
 # Save to DB
 # ---------------------------------------------------------------------------
 
-def save_predictions_to_db(predictions: pd.DataFrame, conn, model_name: str) -> int:
-    """Upsert predictions to the predictions table. Returns number of rows saved."""
-    if conn is None:
-        return 0
-    try:
-        import psycopg2.extras
-        rows = [
-            {
-                "game_id":       str(r["game_id"]),
-                "model_name":    model_name,
-                "prob_home_win": float(r["prob_home_win"]),
-                "predicted_at":  datetime.now(timezone.utc),
-            }
-            for _, r in predictions.iterrows()
-        ]
-        with conn.cursor() as cur:
-            psycopg2.extras.execute_batch(
-                cur,
-                """
-                INSERT INTO predictions (game_id, model_name, prob_home_win, predicted_at)
-                VALUES (%(game_id)s, %(model_name)s, %(prob_home_win)s, %(predicted_at)s)
-                ON CONFLICT (game_id, model_name) DO UPDATE SET
-                    prob_home_win = EXCLUDED.prob_home_win,
-                    predicted_at  = EXCLUDED.predicted_at
-                """,
-                rows,
-            )
-        conn.commit()
-        logger.info("Saved %d predictions to DB", len(rows))
-        return len(rows)
-    except Exception as e:
-        logger.error("Failed to save predictions to DB: %s", e)
-        conn.rollback()
-        return 0
-
-
 def mark_started(predictions: pd.DataFrame, games: list[dict]) -> pd.DataFrame:
     """Add ``already_started``: True once a game is past its pre-game states.
 
@@ -840,7 +804,7 @@ def run(
     Args:
         target_date:  date to predict for (default: today)
         model_name:   which saved model to use
-        dry_run:      write nothing — neither Postgres nor the history log
+        dry_run:      write nothing to the history log
         conn:         optional psycopg2 connection
         min_coverage: drop games with fewer than this fraction of the model's
                       features populated (season openers excepted; see predict)
@@ -912,8 +876,8 @@ def run(
 
     # 6. Save prediction history (Parquet)
     #
-    # dry_run now covers this.  It used to guard only the Postgres write below,
-    # so --dry-run appended to prediction_history.parquet -- the one file in
+    # dry_run now covers this.  It used to guard only a Postgres write, so
+    # --dry-run appended to prediction_history.parquet -- the one file in
     # the repo that cannot be rebuilt from source data, because it records what
     # the model believed *before* the games were played.  Anyone exercising the
     # pipeline was quietly writing to it.
@@ -948,9 +912,9 @@ def run(
             len(recordable),
         )
 
-    # 6b. Optionally save to DB
-    if not dry_run and conn is not None and len(recordable):
-        save_predictions_to_db(recordable, conn, model_name)
+    # There was a Postgres write here.  Its columns never matched
+    # db/schema.sql, so it failed on every run without saving a row, and
+    # nothing reads that table: the Parquet log above is the record.
 
     # 7. Return display columns
     display_cols = [
